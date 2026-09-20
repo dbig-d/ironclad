@@ -59,6 +59,10 @@ class Game {
     if (s.rules && s.rules.time && isFinite(this.clock)) this.clock = s.rules.time;
     this.respawnTime = this.mode.respawnTime || this.def.respawn;
     this.spawnAll();
+    // Tanks are addressed by position online, and the players at this screen
+    // (everyone in local play, one seat online) drive the camera and HUD.
+    this.tanks.forEach((t, i) => { t.netIdx = i; });
+    this.locals = this.players;
     if (this.twists.minefield) this.layMinefield(this.twists.minefield);
     if (this.mode.afterSpawn) this.mode.afterSpawn();
   }
@@ -129,14 +133,18 @@ class Game {
     const names = this.rng.shuffle(CALLSIGNS.slice());
     let ni = 0;
     const humans = s.demo ? 0 : clamp(s.players | 0, 1, 2);
+    // Online: the host hands out the player slots, so seat numbers come from there.
+    const slots = s.netSlots;
     // One Shot: a single armor segment and any hit kills (see damage()).
     this.baseHp = this.oneShot ? TANK.shellDamage : clamp(s.hits, HITS.min, HITS.max) * TANK.shellDamage;
     // Campaign: which side a tank fights on decides its skill and tech tier.
-    const makeTank = (team, color, isPlayer, roleIdx) => {
+    const makeTank = (team, color, isPlayer, roleIdx, slot = -1) => {
       const side = this.def.teams ? (team === 0 ? 'ally' : 'enemy') : 'enemy';
       const skill = isPlayer ? null : this.pickSkill(side);
       const pi = this.players.length;
-      const name = isPlayer ? (humans > 1 ? (pi === 0 ? s.playerName : s.p2Name) || 'P' + (pi + 1) : s.playerName) : names[ni++ % names.length];
+      const name = isPlayer
+        ? (slot >= 0 ? slots[slot].name : humans > 1 ? (pi === 0 ? s.playerName : s.p2Name) || 'P' + (pi + 1) : s.playerName)
+        : names[ni++ % names.length];
       const t = new Tank({ name, team, color, isPlayer, skill });
       t.loadout = this.loadoutFor(isPlayer, side);
       if (this.campaign) {
@@ -146,7 +154,7 @@ class Game {
         delete t.loadout.up;
       }
       t.recalc(this.baseHp);
-      if (isPlayer) { t.humanIndex = pi; this.players.push(t); }
+      if (isPlayer) { t.humanIndex = slot >= 0 ? slot : pi; this.players.push(t); }
       if (!isPlayer || s.autopilot) {
         t.brain = new BotBrain(t, skill || SKILLS[2], this.rng.int(1, 1e9));
         const every = s.size >= 10 ? 5 : 3;
@@ -162,8 +170,9 @@ class Game {
         const count = s.teamSizes ? s.teamSizes[team] : s.size;
         for (let i = 0; i < count; i++) {
           // Co-op: both players on team 0. Versus: P1 leads team 0, P2 leads team 1.
-          const isPlayer = s.versus ? i === 0 && team < humans : team === 0 && i < humans;
-          makeTank(team, TEAM_COLORS[team], isPlayer, i);
+          const slot = slots ? slots.findIndex(sl => sl.team === team && sl.idx === i) : -1;
+          const isPlayer = slots ? slot >= 0 : s.versus ? i === 0 && team < humans : team === 0 && i < humans;
+          makeTank(team, TEAM_COLORS[team], isPlayer, i, slot);
         }
       }
     } else {
@@ -172,10 +181,12 @@ class Game {
         const color = ffaColor(i);
         this.teams.push({ id: i, name: 'Solo', color, score: 0 });
         // Battle royale co-op players share team 0 (a duo) and its livery.
-        const duo = s.mode === 'br' && !s.versus && i < humans && i > 0;
-        makeTank(duo ? 0 : i, duo ? ffaColor(0) : color, i < humans, 0);
+        const slot = slots ? slots.findIndex(sl => sl.idx === i) : -1;
+        const duo = !slots && s.mode === 'br' && !s.versus && i < humans && i > 0;
+        makeTank(duo ? 0 : i, duo ? ffaColor(0) : color, slots ? slot >= 0 : i < humans, 0, slot);
       }
     }
+    if (slots) this.players.sort((a, b) => a.humanIndex - b.humanIndex);
     if (this.twists.ace) this.crownAce(this.twists.ace);
   }
 

@@ -23,6 +23,8 @@ function angNorm(a) {
   return a - Math.PI;
 }
 const angDiff = (from, to) => angNorm(to - from);
+// Shortest-way-round interpolation between two angles.
+const lerpAngle = (a, b, t) => angNorm(a + angDiff(a, b) * t);
 
 function rotateToward(cur, target, maxStep) {
   const d = angDiff(cur, target);

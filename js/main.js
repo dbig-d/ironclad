@@ -10,6 +10,7 @@ const App = {
     this.input = new Input(this.canvas);
     this.sfx = new Sfx();
     this.ui = new UI(this);
+    this.net = new Net(this);
     this.sfx.setVolume(this.ui.settings.volume);
     this.paused = false;
     this.locks = [null, null];
@@ -46,6 +47,7 @@ const App = {
   // Deploy from the menu (or restart): a campaign mission replays itself;
   // choosing Campaign in the menu opens the world map instead.
   startMatch() {
+    if (this.net.active) return this.backToLobby();
     if (this.mission) return this.startMission(this.mission);
     if (this.ui.settings.progression === 'campaign') return this.openCampaign();
     this.launch(this.ui.matchSettings());
@@ -83,6 +85,89 @@ const App = {
     this.ui.showHud(this.game);
   },
 
+  // ---- online ----------------------------------------------------------------------------
+  // Host and joiners build the same world from the same settings and seed; only
+  // the moving parts travel over the wire.
+  startOnline(settings, role) {
+    this.sfx.unlock();
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    this.mission = null;
+    this.steering = this.ui.settings.steering;
+    const g = this.game = new Game(settings);
+    const slots = settings.netSlots;
+    const mySlot = Math.max(0, slots.findIndex(sl => sl.id === this.net.me));
+    const mine = g.players[mySlot] || g.players[0];
+    g.locals = [mine];
+    if (role === 'host') {
+      for (const p of this.net.peers.values()) {
+        const k = slots.findIndex(sl => sl.id === p.id);
+        p.tank = k >= 0 ? g.players[k] : null;
+        p.lastSeq = -1;
+      }
+    }
+    this.renderer.setGame(g, [mine]);
+    this.state = 'playing';
+    this.paused = false;
+    this.locks = [null, null];
+    this.spectate = [null, null];
+    this.endShown = false;
+    this.ui.showHud(g);
+  },
+
+  // A joiner's own tank runs the same movement code locally, then eases back
+  // toward the host's version whenever a snapshot lands (see Net.reconcile).
+  predictLocal(dt, t, g, canDrive) {
+    if (!t || !t.alive || !canDrive) return;
+    const tire = PARTS.tires[t.loadout.tires];
+    t.surfaceMul = g.map.onWater(t.x, t.y) ? tire.water : g.map.onRoad(t.x, t.y) ? tire.road : tire.off;
+    t.move(dt);
+    g.map.resolveCircle(t, t.radius);
+    t.settle(dt);
+  },
+
+  onlinePlayerLeft(peer) {
+    if (peer.tank) {
+      // Hand the empty seat to the computer so the match can finish.
+      peer.tank.brain = peer.tank.brain || new BotBrain(peer.tank, SKILLS[2], (Math.random() * 1e9) | 0);
+      this.ui.announce(peer.name + ' left', 'a crew took over', '#ffb347');
+    }
+  },
+
+  onlineMatchOver(m) { /* the snapshot already carries the result */ },
+
+  onlineEnded(reason) {
+    this.net.leave(true);
+    this.toTitle();
+    this.ui.showOnline();
+    this.ui.toast(reason);
+  },
+
+  // Back to the room between matches: the host can set up the next one.
+  backToLobby(fromHost) {
+    if (!this.net.active) return this.toTitle();
+    this.net.state = 'lobby';
+    this.net.snapBuf.length = 0;
+    if (this.net.isHost && !fromHost) this.net.sendLobby();
+    this.paused = false;
+    this.endShown = false;
+    this.ui.showOnline();
+    this.startDemo();
+    this.state = 'online';
+  },
+
+  toOnline() {
+    this.mission = null;
+    this.paused = false;
+    this.ui.showOnline();
+    if (!this.game || this.state === 'playing') this.startDemo();
+    this.state = 'online';
+  },
+
+  leaveOnline() {
+    this.net.leave();
+    this.toTitle();
+  },
+
   // The title screen: the way into skirmish, campaign or online.
   toTitle() {
     this.mission = null;
@@ -103,6 +188,8 @@ const App = {
 
   setPaused(p) {
     if (this.state !== 'playing' || this.endShown) return;
+    // Online, one player's menu can't stop everyone else's battle.
+    if (this.net.active && p) { this.ui.toast('The battle keeps running while you are in here.'); }
     this.paused = p;
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     this.ui.showPause(p);
@@ -169,15 +256,17 @@ const App = {
       else if (inp.wasPressed('Escape')) return this.toTitle();
     }
     if (this.state === 'title' && !typingOrModal && inp.wasPressed('Enter')) return this.toMenu();
+    if (this.state === 'online' && !typingOrModal && inp.wasPressed('Escape')) return this.leaveOnline();
     if (this.state === 'playing') {
       if (inp.wasPressed('Escape') || inp.wasPressed('KeyP')) this.setPaused(!this.paused);
       if (inp.wasPressed('KeyM')) this.sfx.toggleMute();
     }
-    const g = this.game, humans = g.players;
+    const g = this.game, humans = g.locals || g.players;
     const playing = this.state === 'playing';
     const coop = humans.length > 1;
-    const simulate = !(playing && this.paused);
+    const simulate = !(playing && this.paused) || this.net.active;
     const canDrive = playing && !this.paused && g.phase !== 'over';
+    const netPlay = playing && this.net.active;
 
     // Controls.
     let aim = null, preview = null;
@@ -212,13 +301,22 @@ const App = {
       if (k >= 0) { g.pickOffer(p, k); this.sfx.play('click'); }
     });
 
-    if (simulate) {
+    if (simulate && this.net.isClient && playing) {
+      // A joiner doesn't simulate: it plays back what the host sends, and
+      // drives its own tank locally so steering doesn't wait for the round trip.
+      this.net.clientInput(dt, humans[0], g);
+      this.net.clientFrame(dt, g);
+      this.predictLocal(dt, humans[0], g, canDrive);
+      this.processEvents();
+      r.fx.update(dt, g);
+    } else if (simulate) {
       // Brief slow motion as the match ends.
       const simDt = dt * (g.phase === 'over' && g.overT < 0.8 ? 0.35 : 1);
       const steps = Math.ceil(simDt / (1 / 60));
       for (let i = 0; i < steps; i++) g.update(simDt / steps);
       this.processEvents();
       r.fx.update(simDt, g);
+      if (this.net.isHost && playing) this.net.hostFrame(dt, g);
     }
 
     // Cameras: one per view.

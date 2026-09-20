@@ -9,6 +9,7 @@ A top-down WWII-era tank game that runs in the browser. No engine, no build step
 - **Skirmish** — one player, or two on one screen. Nine modes: team deathmatch, king of the hill, capture the flag, one shot, escort, hardcore, battle royale (up to 40 tanks), juggernaut and free-for-all sizes from 1v1 to 10v10.
 - **Campaign** — "The Iron Road": 42 missions across seven regions on a connected world map, with money, stars, five pilot saves and a hangar for buying and fitting parts.
 - **43 tank parts** — weapons, hulls, running gear and specials, from a plain cannon to wire-guided missiles, airstrikes and bouncing grenades.
+- **Online** — host a room, share the five-character code, and up to four tanks play together from any mix of phones and computers. The host runs the battle; everyone else sends their controls and sees it play out. Direct peer-to-peer where the network allows it, otherwise relayed.
 - **Progression** — standard, in-match leveling, freeplay loadouts, or the campaign hangar.
 - Procedurally built battlefields in seven biomes, with weather, night missions, fog and sandstorms.
 

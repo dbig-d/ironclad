@@ -15,7 +15,7 @@
 <canvas id="game"></canvas>
 
 <!-- Title screen: pick a way to play (a live bot battle runs behind it) -->
-<div id="title" class="screen title-screen" hidden>
+<div id="title" class="screen title-screen">
   <button type="button" class="fs-btn" data-fs aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
   <div class="title-panel">
     <header class="brand">
@@ -36,19 +36,31 @@
         <span class="tc-desc">The Iron Road: 42 missions, money and stars, and a hangar to build your tank.</span>
         <span class="tc-meta" id="tc-campaign"></span>
       </button>
-      <button type="button" class="tcard locked" id="t-online">
+      <button type="button" class="tcard" id="t-online">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.2 2.4 3.3 5.3 3.3 8.5S14.2 18.1 12 20.5c-2.2-2.4-3.3-5.3-3.3-8.5S9.8 5.9 12 3.5z"/></svg>
         <span class="tc-name">Online</span>
         <span class="tc-desc">Co-op or versus with a friend on another phone or laptop, joined by a room code.</span>
-        <span class="tc-meta">In the works</span>
-        <span class="tc-lock">Locked</span>
+        <span class="tc-meta" id="tc-online">Up to four tanks</span>
       </button>
     </div>
   </div>
 </div>
 
+<!-- Online: host a room or join one with a code -->
+<div id="online" class="screen online-screen" hidden>
+  <button type="button" class="btn ghost menu-back" id="on-back">Back</button>
+  <button type="button" class="fs-btn" data-fs aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+  <div class="online-panel">
+    <header class="brand">
+      <p class="eyebrow">Online</p>
+      <h1 class="title">PLAY TOGETHER</h1>
+    </header>
+    <div class="online-body" id="on-body"></div>
+  </div>
+</div>
+
 <!-- Skirmish menu (a live bot battle runs behind it) -->
-<div id="menu" class="screen">
+<div id="menu" class="screen" hidden>
   <button type="button" class="btn ghost menu-back" id="menu-back">Back</button>
   <button type="button" class="fs-btn" data-fs aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
   <div class="menu-panel">
@@ -283,5 +295,6 @@
 <script src="js/worldmap.js"></script>
 <script src="js/audio.js"></script>
 <script src="js/input.js"></script>
+<script src="js/net.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/main.js"></script>

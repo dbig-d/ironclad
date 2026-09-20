@@ -1121,6 +1121,43 @@ body.touch .deploy kbd, body.touch .cp-hint { display: none; }
   .title-panel .tagline { display: none; }
 }
 
+/* Online lobby */
+.online-screen { align-items: center; justify-content: center; }
+.online-panel { width: min(640px, 100%); display: grid; gap: clamp(12px, 2.5vh, 20px); animation: rise .5s cubic-bezier(.2,.8,.2,1) both; }
+.online-panel .title { font-size: clamp(38px, 6vw, 62px); }
+.online-body { display: grid; gap: 14px; }
+.on-actions { display: grid; gap: 10px; }
+.on-join { display: flex; gap: 8px; }
+#on-code {
+  flex: 1; min-width: 0; padding: 12px 14px;
+  font: 400 30px/1 var(--display); letter-spacing: 0.22em; text-align: center; text-transform: uppercase;
+  color: var(--ink); background: rgba(8, 10, 7, 0.72); border: 1px solid var(--line); border-radius: 10px;
+}
+#on-code:focus { outline: none; border-color: var(--accent); }
+.on-codebox { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--panel); border: 1px solid rgba(240,169,58,.45); border-radius: 12px; }
+.on-codebox .label { margin: 0; }
+.on-codebox b { font: 400 40px/1 var(--display); letter-spacing: 0.3em; color: var(--accent); margin-right: auto; }
+.on-players { display: grid; gap: 6px; }
+.on-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.on-row .nm { font: 700 16px/1 var(--ui); letter-spacing: 0.04em; text-transform: uppercase; }
+.on-tag { padding: 2px 7px; border-radius: 999px; background: rgba(236,230,214,.1); font: 700 10px/1.5 var(--ui); letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-faint); }
+.on-tag.you { background: rgba(240,169,58,.18); color: var(--accent); }
+.on-tag.relay { background: rgba(120,160,255,.16); color: #9fc4ff; }
+.on-row .sp { margin-left: auto; }
+.on-teams { display: flex; gap: 4px; }
+.on-teams button { width: 34px; padding: 6px 0; border-radius: 7px; border: 1px solid var(--line); background: transparent; color: var(--ink-dim); font: 700 13px/1 var(--ui); cursor: pointer; }
+.on-teams button.on { border-color: var(--accent); background: rgba(240,169,58,.16); color: var(--ink); }
+.on-wait { margin: 0; font: 600 14px/1.4 var(--ui); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-dim); text-align: center; }
+.on-err { margin: 0; padding: 10px 12px; border-radius: 10px; background: rgba(200,60,40,.14); border: 1px solid rgba(200,60,40,.4); color: #ffb3a2; font-size: 13.5px; }
+.on-foot { display: flex; gap: 8px; }
+.on-foot .btn { flex: 1; }
+.btn.big { padding: 14px 18px; font-size: 20px; }
+@media (max-width: 700px) {
+  .online-panel .title { font-size: 36px; }
+  .on-codebox b { font-size: 30px; letter-spacing: 0.2em; }
+  .on-row { padding: 8px 10px; gap: 8px; }
+}
+
 /* Fullscreen buttons. */
 .fs-btn {
   position: absolute;

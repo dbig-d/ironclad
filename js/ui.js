@@ -215,7 +215,8 @@ class UI {
     $('menu-back').addEventListener('click', () => { this.app.sfx.play('click'); this.app.toTitle(); });
     $('t-skirmish').addEventListener('click', () => { this.app.sfx.play('click'); this.app.toMenu(); });
     $('t-campaign').addEventListener('click', () => { this.app.sfx.play('click'); this.app.openCampaign(); });
-    $('t-online').addEventListener('click', () => this.toast('Online play isn\u2019t built yet. The plan: one player hosts, shares a short room code, and picks the teams.'));
+    $('t-online').addEventListener('click', () => { this.app.sfx.play('click'); this.app.toOnline(); });
+    $('on-back').addEventListener('click', () => { this.app.sfx.play('click'); this.app.leaveOnline(); });
     $('p-resume').addEventListener('click', () => this.app.setPaused(false));
     $('p-restart').addEventListener('click', () => this.app.startMatch());
     // Fullscreen gives phones the whole screen.
@@ -286,6 +287,7 @@ class UI {
   // Title screen: skirmish, campaign or (later) online.
   showTitle() {
     $('title').hidden = true;
+    $('online').hidden = true;
     $('menu').hidden = true;
     $('campaign').hidden = true;
     $('hangar').hidden = true;
@@ -308,6 +310,100 @@ class UI {
       : 'New campaign · Mission 1';
   }
 
+  // Online: host a room, or join one with a code.
+  showOnline() {
+    $('title').hidden = true;
+    $('online').hidden = true;
+    $('menu').hidden = true;
+    $('campaign').hidden = true;
+    $('hangar').hidden = true;
+    $('hud').hidden = true;
+    $('pause').hidden = true;
+    $('end').hidden = true;
+    document.body.classList.remove('playing');
+    this.renderOnline();
+    $('online').hidden = false;
+  }
+
+  renderOnline() {
+    const el = $('on-body');
+    if (!el) return;
+    const net = this.app.net, s = this.settings;
+    const esc2 = t => esc(String(t));
+    if (net.state === 'off') {
+      let framed = false;
+      try { framed = window.top !== window.self; } catch (e) { framed = true; }
+      const embedNote = framed
+        ? `<p class="on-err">Online play needs the game's own page: this viewer blocks the connection.
+             <br><b>${NET.home}</b></p>`
+        : '';
+      el.innerHTML = `${embedNote}${net.error ? `<p class="on-err">${esc2(net.error)}</p>` : ''}
+        <section class="field"><h2 class="label"><label for="on-name">Callsign</label></h2>
+          <div class="names"><input id="on-name" type="text" autocomplete="off" spellcheck="false" maxlength="14" placeholder="Your callsign" value="${esc2(s.playerName || '')}"></div></section>
+        <div class="on-actions">
+          <button type="button" class="btn big" id="on-host">Host a game</button>
+          <div class="on-join"><input id="on-code" autocomplete="off" spellcheck="false" maxlength="5" placeholder="CODE" aria-label="Room code"><button type="button" class="btn" id="on-join">Join</button></div>
+        </div>
+        <p class="hint">One player hosts and reads out the code. Up to four tanks, on any mix of phones and computers.</p>`;
+      const name = () => cleanName($('on-name').value) || 'Player';
+      const remember = () => { s.playerName = cleanName($('on-name').value); this.save(); };
+      $('on-host').addEventListener('click', async () => { remember(); this.app.sfx.play('click'); await net.host(name()); this.renderOnline(); });
+      const join = async () => {
+        const code = ($('on-code').value || '').trim().toUpperCase();
+        if (code.length < 4) return this.toast('Enter the five-character code from the host.');
+        remember();
+        this.app.sfx.play('click');
+        await net.join(code, name());
+        this.renderOnline();
+      };
+      $('on-join').addEventListener('click', join);
+      $('on-code').addEventListener('keydown', e => { if (e.key === 'Enter') join(); });
+      return;
+    }
+    if (net.state === 'connecting') {
+      el.innerHTML = `<p class="on-wait">${net.isHost ? 'Opening a room\u2026' : 'Looking for that room\u2026'}</p>
+        <div class="on-foot"><button type="button" class="btn ghost" id="on-leave">Cancel</button></div>`;
+      $('on-leave').addEventListener('click', () => { net.leave(); this.renderOnline(); });
+      return;
+    }
+    // Lobby.
+    const host = net.isHost, L = net.lobby, team = MODES[L.mode].teams;
+    const rows = net.roster.map(r => `<div class="on-row">
+        <span class="nm">${esc2(r.name)}</span>
+        ${r.you ? '<span class="on-tag you">You</span>' : ''}
+        ${r.host ? '<span class="on-tag">Host</span>' : ''}
+        ${!r.you && r.mode === 'relay' ? '<span class="on-tag relay">Relayed</span>' : ''}
+        ${!r.you && r.ping ? `<span class="on-tag">${r.ping} ms</span>` : ''}
+        <span class="sp"></span>
+        ${team ? `<span class="on-teams">${[0, 1].map(t => `<button type="button" class="${r.team === t ? 'on' : ''}" data-team="${t}" data-id="${r.id}" ${host ? '' : 'disabled'}>${t === 0 ? 'A' : 'B'}</button>`).join('')}</span>` : ''}
+      </div>`).join('');
+    el.innerHTML = `${host ? `<div class="on-codebox"><span class="label">Room code</span><b>${net.code}</b><button type="button" class="btn ghost small" id="on-copy">Copy</button></div>`
+        : `<p class="on-wait">Room ${net.code} \u00b7 waiting for the host to start</p>`}
+      <div class="on-players">${rows}</div>
+      ${host ? `<section class="field"><h2 class="label">Operation</h2><div class="seg" id="on-mode"></div></section>
+        <section class="field split"><div><h2 class="label">Squad size</h2><div class="seg" id="on-size"></div></div>
+          <div><h2 class="label">Armor</h2><div class="seg" id="on-hits"></div></div></section>`
+        : `<p class="hint">${MODES[L.mode].name} \u00b7 ${team ? L.size + 'v' + L.size : L.size + ' tanks'} \u00b7 ${L.hits} hits</p>`}
+      <div class="on-foot">
+        ${host ? '<button type="button" class="btn big" id="on-start">Start match</button>' : ''}
+        <button type="button" class="btn ghost" id="on-leave">Leave</button>
+      </div>`;
+    if (host) {
+      $('on-copy').addEventListener('click', () => {
+        const done = () => this.toast('Code ' + net.code + ' copied. Send it to your friend.');
+        if (navigator.clipboard) navigator.clipboard.writeText(net.code).then(done, () => this.toast('Room code: ' + net.code));
+        else this.toast('Room code: ' + net.code);
+      });
+      this.radio($('on-mode'), NET.modes.map(id => ({ value: id, label: MODES[id].name })), L.mode, v => net.setLobby({ mode: v }), it => it.label);
+      const sizes = MODES[L.mode].teams ? [1, 2, 4] : [4, 6, 10];
+      this.radio($('on-size'), sizes.map(n => ({ value: n, label: MODES[L.mode].teams ? n + 'v' + n : n + ' tanks' })), sizes.includes(L.size) ? L.size : sizes[1], v => net.setLobby({ size: v }), it => it.label);
+      this.radio($('on-hits'), [5, 7, 9].map(n => ({ value: n, label: n + ' hits' })), L.hits, v => net.setLobby({ hits: v }), it => it.label);
+      $('on-start').addEventListener('click', () => { this.app.sfx.play('click'); net.start(); });
+      el.querySelectorAll('.on-teams button').forEach(b => b.addEventListener('click', () => net.setTeam(b.dataset.id, +b.dataset.team)));
+    }
+    $('on-leave').addEventListener('click', () => { this.app.sfx.play('click'); this.app.leaveOnline(); });
+  }
+
   showMenu() {
     $('title').hidden = true;
     $('campaign').hidden = true;
@@ -328,6 +424,7 @@ class UI {
     $('p-menu').textContent = game.campaign ? 'Leave mission' : 'Main menu';
     $('p-restart').textContent = game.campaign ? 'Restart mission' : 'Restart match';
     $('title').hidden = true;
+    $('online').hidden = true;
     $('menu').hidden = true;
     $('hud').hidden = false;
     $('pause').hidden = true;
@@ -338,10 +435,12 @@ class UI {
     $('killfeed').innerHTML = '';
     $('announce').innerHTML = '';
     $('center-msg').innerHTML = '';
-    const coop = game.players.length > 1; // split screen (co-op or versus)
+    // Seats at this screen: both players in local co-op, only yours online.
+    const seats = game.locals || game.players;
+    const coop = seats.length > 1; // split screen (co-op or versus)
     $('hud').classList.toggle('coop', coop);
     // One status panel and one death card per human player.
-    $('panels').innerHTML = game.players.map((p, i) => `
+    $('panels').innerHTML = seats.map((p, i) => `
       <div class="player-panel" data-i="${i}" style="${coop ? '--pc:' + PLAYER_COLORS[i] + ';' : ''}">
         <div class="pp-top"><span class="pp-id"><span class="pp-name">${esc(p.name)}</span><span class="pp-auto" title="Autofire">AUTO ${keys(i).auto}</span></span><span class="pp-kd"></span></div>
         <div class="hpbar"><div class="pp-hp"></div><div class="segs"></div></div>
@@ -351,7 +450,7 @@ class UI {
         ${coop ? `<div class="pp-keys">${PANEL_KEYS.two[i].hint}</div>` : ''}
       </div>`).join('');
     function keys(i) { return coop ? PANEL_KEYS.two[i] : PANEL_KEYS.solo; }
-    $('deaths').innerHTML = game.players.map((p, i) => `
+    $('deaths').innerHTML = seats.map((p, i) => `
       <div class="death-card" data-i="${i}" hidden>
         <p class="death-title"></p><p class="death-by"></p><p class="death-timer"></p>
       </div>`).join('');
@@ -389,6 +488,11 @@ class UI {
         $('center-msg').innerHTML = `<div class="count">${n}</div><div class="count-sub">${esc(game.def.name)}</div>`;
         this.app.sfx.play('beep');
       }
+    } else if (this.lastCount) {
+      // An online joiner can miss the "go" event; never leave the count on screen.
+      this.lastCount = 0;
+      const cm = $('center-msg');
+      if (cm.querySelector('.count') && !cm.querySelector('.go')) cm.innerHTML = '';
     }
 
     // Death cards: respawn countdown, or (battle royale) who you're watching.
@@ -614,7 +718,10 @@ class UI {
       const pa = clamp(a.score / h.target, 0, 1) * 100, pb = clamp(b.score / h.target, 0, 1) * 100;
       const low = game.clock < 30 && game.phase === 'live';
       const versus = game.settings.versus;
-      const tag = right => versus ? ' · ' + esc(humans[right ? 1 : 0].name) : right ? '' : coop ? ' · P1 + P2' : ' · ' + esc(humans[0].name);
+      const myTeam = humans.length ? humans[0].team : 0;
+      const tag = right => versus ? ' · ' + esc(humans[right ? 1 : 0].name)
+        : coop ? (right ? '' : ' · P1 + P2')
+        : ((right ? 1 : 0) === myTeam ? ' · ' + esc(humans[0].name) : '');
       const team = (t, s, p, right) => `<div class="sb-team ${right ? 'right' : ''}"><span class="nm" style="color:${t.color.ui}">${t.name}${tag(right)}</span><span class="sc" style="color:${shade(t.color.ui, 0.35)}">${s}</span><div class="sb-bar"><i style="width:${p.toFixed(1)}%;background:${t.color.ui}"></i></div></div>`;
       const goal = game.mode.overtime ? 'Overtime' : `First to ${h.target} ${h.label}`;
       html = `<div class="sb-main">${team(a, sa, pa, false)}
@@ -870,6 +977,7 @@ class UI {
 
   showCampaign() {
     $('title').hidden = true;
+    $('online').hidden = true;
     $('menu').hidden = true;
     $('hud').hidden = true;
     $('end').hidden = true;
