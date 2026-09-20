@@ -1,0 +1,287 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f120e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Ironclad</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect x=%274%27 y=%279%27 width=%2724%27 height=%2716%27 rx=%274%27 fill=%27%233f7fc4%27/%3E%3Ccircle cx=%2714%27 cy=%2717%27 r=%275%27 fill=%27%23244a78%27/%3E%3Crect x=%2716%27 y=%2715.5%27 width=%2714%27 height=%273%27 fill=%27%23244a78%27/%3E%3C/svg%3E">
+<meta name="description" content="Top-down tank battles against AI crews.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=Saira+Stencil+One&display=swap">
+<link rel="stylesheet" href="css/style.css">
+
+<canvas id="game"></canvas>
+
+<!-- Title screen: pick a way to play (a live bot battle runs behind it) -->
+<div id="title" class="screen title-screen" hidden>
+  <button type="button" class="fs-btn" data-fs aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+  <div class="title-panel">
+    <header class="brand">
+      <p class="eyebrow">Armored skirmish</p>
+      <h1 class="title">IRONCLAD</h1>
+      <p class="tagline">Command a tank against AI crews on procedurally built battlefields.</p>
+    </header>
+    <div class="title-cards">
+      <button type="button" class="tcard" id="t-skirmish">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 13h2.2l1.4-2.4h4.1l1.1 2.4H16v-1.6h3.4V13H21v4.2h-2v1.4h-2.6v-1.4H6.6v1.4H4V17H3zm5.4-6.6h5.2l1.5 2.6H7z"/><circle cx="11" cy="15" r="1.6" fill="#0f120e"/></svg>
+        <span class="tc-name">Skirmish</span>
+        <span class="tc-desc">One player, or two on one screen. Nine modes on every battlefield.</span>
+        <span class="tc-meta" id="tc-skirmish"></span>
+      </button>
+      <button type="button" class="tcard" id="t-campaign">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6.5 9 4l6 2.5L21 4v13.5L15 20l-6-2.5L3 20z"/><path d="M9 4v13.5M15 6.5V20"/></svg>
+        <span class="tc-name">Campaign</span>
+        <span class="tc-desc">The Iron Road: 42 missions, money and stars, and a hangar to build your tank.</span>
+        <span class="tc-meta" id="tc-campaign"></span>
+      </button>
+      <button type="button" class="tcard locked" id="t-online">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.2 2.4 3.3 5.3 3.3 8.5S14.2 18.1 12 20.5c-2.2-2.4-3.3-5.3-3.3-8.5S9.8 5.9 12 3.5z"/></svg>
+        <span class="tc-name">Online</span>
+        <span class="tc-desc">Co-op or versus with a friend on another phone or laptop, joined by a room code.</span>
+        <span class="tc-meta">In the works</span>
+        <span class="tc-lock">Locked</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Skirmish menu (a live bot battle runs behind it) -->
+<div id="menu" class="screen">
+  <button type="button" class="btn ghost menu-back" id="menu-back">Back</button>
+  <button type="button" class="fs-btn" data-fs aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+  <div class="menu-panel">
+    <header class="brand">
+      <p class="eyebrow">Armored skirmish</p>
+      <h1 class="title">IRONCLAD</h1>
+      <p class="tagline">Command a tank against AI crews on procedurally built battlefields.</p>
+    </header>
+
+    <section class="field std-only">
+      <h2 class="label">Operation</h2>
+      <div class="modes" id="mode-list" role="radiogroup" aria-label="Game mode"></div>
+      <p class="hint" id="mode-blurb"></p>
+    </section>
+
+    <section class="field split std-only">
+      <div>
+        <h2 class="label" id="size-label">Squad size</h2>
+        <div class="seg" id="size-list" role="radiogroup" aria-labelledby="size-label"></div>
+      </div>
+      <div class="armor">
+        <h2 class="label"><label for="hits">Armor</label></h2>
+        <div class="armor-row" title="Average hits to destroy a tank"><input type="range" id="hits" min="3" max="12" step="1"><output id="hits-out" for="hits"></output></div>
+      </div>
+    </section>
+
+    <section class="field std-only">
+      <h2 class="label" id="diff-label">Enemy crews</h2>
+      <div class="seg" id="diff-list" role="radiogroup" aria-labelledby="diff-label"></div>
+      <p class="hint" id="diff-blurb"></p>
+    </section>
+
+    <section class="field std-only">
+      <h2 class="label"><label for="name-p1">Callsign</label></h2>
+      <div class="names"><input id="name-p1" type="text" autocomplete="off" spellcheck="false" placeholder="Your callsign"><input id="name-p2" type="text" autocomplete="off" spellcheck="false" placeholder="Player 2 callsign" aria-label="Player 2 callsign" hidden></div>
+    </section>
+
+    <section class="field split">
+      <div>
+        <h2 class="label" id="players-label">Players</h2>
+        <div class="seg" id="players-list" role="radiogroup" aria-labelledby="players-label"></div>
+      </div>
+      <div>
+        <h2 class="label" id="steer-label">Steering</h2>
+        <div class="seg" id="steer-list" role="radiogroup" aria-labelledby="steer-label"></div>
+      </div>
+    </section>
+
+    <section class="field">
+      <h2 class="label" id="prog-label">Progression</h2>
+      <div class="seg" id="prog-list" role="radiogroup" aria-labelledby="prog-label"></div>
+      <p class="hint" id="prog-blurb"></p>
+    </section>
+
+    <section class="field" id="cp-card" hidden>
+      <div class="cp-card">
+        <div class="cpc-top"><span class="cpc-title">The Iron Road</span><span class="cpc-stars" id="cpc-stars"></span></div>
+        <p class="cpc-next" id="cpc-next"></p>
+        <div class="cpc-bar"><i id="cpc-bar"></i></div>
+        <div class="cpc-meta"><span id="cpc-money"></span><span id="cpc-prog"></span></div>
+        <div class="cpc-pilot"><span>Pilot <b id="cpc-pilot"></b></span><button type="button" class="btn ghost small" id="cpc-pilots">Pilots</button></div>
+      </div>
+    </section>
+
+    <section class="field std-only">
+      <h2 class="label" id="biome-label">Theater</h2>
+      <div class="swatches" id="biome-list" role="radiogroup" aria-labelledby="biome-label"></div>
+    </section>
+
+    <button id="deploy" class="deploy" type="button">Deploy <kbd>Enter</kbd></button>
+  </div>
+
+  <div class="side-col">
+    <aside class="loadout-card" id="loadout-card" aria-label="Freeplay loadout" hidden>
+      <h2 class="label">Your loadout</h2>
+      <div class="lo-slots" id="lo-slots"></div>
+      <p class="hint" id="lo-desc"></p>
+      <h2 class="label" id="lo-bots-label">Bots use</h2>
+      <div class="seg" id="lo-bots" role="radiogroup" aria-labelledby="lo-bots-label"></div>
+    </aside>
+    <aside class="controls-card" id="controls-card" aria-label="Controls"></aside>
+  </div>
+</div>
+
+<!-- Campaign world map -->
+<div id="campaign" class="cp-screen" hidden>
+  <canvas id="world"></canvas>
+  <header class="cp-top">
+    <button type="button" class="btn ghost" id="cp-back">Menu</button>
+    <div class="cp-head"><p class="eyebrow">Campaign</p><h2 class="cp-title">The Iron Road</h2></div>
+    <button type="button" class="btn ghost cp-pilot" id="cp-pilot">Pilot</button>
+    <div class="cp-wallet"><span class="cp-stars" id="cp-stars"></span><span class="cp-money" id="cp-money"></span></div>
+    <button type="button" class="btn" id="cp-hangar">Hangar</button>
+    <button type="button" class="btn ghost fs-inline" data-fs aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+  </header>
+  <aside class="cp-brief" id="cp-brief" aria-live="polite"></aside>
+  <p class="cp-hint">Drag or scroll to pan · <kbd>←</kbd> <kbd>→</kbd> pick a mission · <kbd>Enter</kbd> deploy</p>
+</div>
+
+<!-- Campaign hangar -->
+<div id="hangar" class="cp-screen hangar" hidden>
+  <header class="cp-top">
+    <button type="button" class="btn ghost" id="hg-back">Campaign</button>
+    <div class="cp-head"><p class="eyebrow">Hangar</p><h2 class="cp-title">Your tank</h2></div>
+    <div class="cp-wallet"><span class="cp-money" id="hg-money"></span></div>
+    <button type="button" class="btn ghost fs-inline" data-fs aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+  </header>
+  <div class="hg-body">
+    <section class="hg-left">
+      <div class="hg-stage"><canvas id="hg-preview"></canvas><p class="hg-previewing" id="hg-previewing" hidden></p></div>
+      <div class="hg-stats" id="hg-stats"></div>
+    </section>
+    <section class="hg-right">
+      <h3 class="label">Workshop</h3>
+      <div class="hg-ups" id="hg-ups"></div>
+      <h3 class="label">Parts</h3>
+      <div class="seg" id="hg-tabs" role="radiogroup" aria-label="Part slot"></div>
+      <div class="hg-parts" id="hg-parts"></div>
+      <div class="hg-action" id="hg-action"></div>
+    </section>
+  </div>
+</div>
+
+<!-- Campaign pilots (save slots) -->
+<div id="pilots" class="overlay" hidden>
+  <div class="card wide pilots-card" role="dialog" aria-labelledby="pilots-title">
+    <h2 class="card-title" id="pilots-title">Pilots</h2>
+    <p class="hint">Each pilot has their own campaign: progress, stars, money and hangar.</p>
+    <ul class="pilot-list" id="pilot-list"></ul>
+    <form class="pilot-new" id="pilot-new"><input id="pilot-name" type="text" maxlength="14" autocomplete="off" spellcheck="false" placeholder="New pilot name" aria-label="New pilot name"><button type="submit" class="btn">New pilot</button></form>
+    <div class="btns"><button type="button" class="btn ghost" id="pilots-close">Done</button></div>
+  </div>
+</div>
+
+<!-- Confirmation prompt -->
+<div id="confirm" class="overlay top" hidden>
+  <div class="card confirm-card" role="alertdialog" aria-labelledby="cf-title" aria-describedby="cf-text">
+    <h2 class="card-title small" id="cf-title"></h2>
+    <p class="cf-text" id="cf-text"></p>
+    <input id="cf-input" type="text" autocomplete="off" spellcheck="false" aria-label="Name" hidden>
+    <div class="btns"><button type="button" class="btn ghost" id="cf-cancel">Cancel</button><button type="button" class="btn" id="cf-ok">OK</button></div>
+  </div>
+</div>
+
+<!-- Touch controls (phones and tablets) -->
+<div id="touch" hidden>
+  <div class="stick" id="stick-l"><i></i></div>
+  <div class="stick" id="stick-r"><i></i></div>
+  <button type="button" class="t-btn t-pause" id="t-pause" aria-label="Pause"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg></button>
+  <button type="button" class="t-btn t-board" id="t-board" aria-label="Scoreboard (hold)"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="6" width="16" height="2.4" rx="1"/><rect x="4" y="11" width="16" height="2.4" rx="1"/><rect x="4" y="16" width="16" height="2.4" rx="1"/></svg></button>
+  <button type="button" class="t-btn t-auto" id="t-auto" aria-label="Autofire">AUTO</button>
+  <button type="button" class="t-btn t-special" id="t-special" aria-label="Special"><span class="t-ico" id="t-ico"></span></button>
+  <p class="t-hint" id="t-hint">Left thumb drives · right thumb aims and fires</p>
+</div>
+
+<!-- In-match HUD -->
+<div id="hud" hidden>
+  <div id="scoreboard"></div>
+  <ol id="killfeed" aria-live="polite"></ol>
+  <div id="announce" aria-live="polite"></div>
+  <div id="center-msg"></div>
+  <div id="panels"></div>
+  <div id="offers"></div>
+  <div id="deaths"></div>
+  <div id="br-out" hidden>
+    <p class="death-title">Eliminated</p>
+    <p class="br-place" id="br-place"></p>
+    <p class="death-by" id="br-by"></p>
+    <div class="btns">
+      <button type="button" class="btn" id="br-watch">Keep watching</button>
+      <button type="button" class="btn" id="br-again">Play again</button>
+      <button type="button" class="btn ghost" id="br-menu">Main menu</button>
+    </div>
+  </div>
+  <div id="tabboard" hidden></div>
+  <div id="spectate" hidden></div>
+</div>
+
+<div id="pause" class="overlay" hidden>
+  <div class="card">
+    <h2 class="card-title">Paused</h2>
+    <div class="btns col">
+      <button type="button" class="btn" id="p-resume">Resume</button>
+      <button type="button" class="btn ghost" id="p-restart">Restart match</button>
+      <button type="button" class="btn ghost" id="p-full" data-fs>Fullscreen</button>
+      <button type="button" class="btn ghost" id="p-menu">Main menu</button>
+    </div>
+    <label class="vol" for="p-volume">Volume <input type="range" id="p-volume" min="0" max="1" step="0.05"></label>
+  </div>
+</div>
+
+<div id="end" class="overlay" hidden>
+  <div class="card wide">
+    <p class="end-eyebrow" id="end-eyebrow"></p>
+    <h2 class="end-title" id="end-title"></h2>
+    <p class="end-sub" id="end-sub"></p>
+    <div class="end-camp" id="end-camp" hidden>
+      <div class="ec-stars" id="ec-stars"></div>
+      <ul class="ec-conds" id="ec-conds"></ul>
+      <div class="ec-pay" id="ec-pay"></div>
+    </div>
+    <div class="end-stats" id="end-stats"></div>
+    <div class="ladder-head">
+      <h3 class="label" id="ladder-label">Lobby ladder</h3>
+      <div class="seg" id="ladder-tabs" role="radiogroup" aria-labelledby="ladder-label">
+        <button type="button" role="radio" data-l="lobby" aria-checked="true">Lobby</button>
+        <button type="button" role="radio" data-l="team" aria-checked="false">Team</button>
+      </div>
+    </div>
+    <div class="table-wrap"><table class="board" id="end-board"></table></div>
+    <div class="btns">
+      <button type="button" class="btn" id="e-again">Play again</button>
+      <button type="button" class="btn ghost" id="e-menu">Main menu</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/util.js"></script>
+<script src="js/config.js"></script>
+<script src="js/parts.js"></script>
+<script src="js/campaign.js"></script>
+<script src="js/map.js"></script>
+<script src="js/tank.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/modes.js"></script>
+<script src="js/game.js"></script>
+<script src="js/art.js"></script>
+<script src="js/terrain.js"></script>
+<script src="js/fx.js"></script>
+<script src="js/hud.js"></script>
+<script src="js/render.js"></script>
+<script src="js/worldmap.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/input.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
