@@ -85,7 +85,7 @@ class ModeBase {
   // Score limit: a campaign mission can set its own.
   ruleLimit(key) {
     const r = this.game.settings.rules;
-    return (r && r.limit) || TEAM_RULES[this.game.settings.size][key];
+    return (r && r.limit) || TEAM_RULES[rulesSize(this.game.settings.size)][key];
   }
 
   onKill() {}
@@ -625,13 +625,13 @@ class EscortMode extends ModeBase {
     const g = this.game, def = this.defenders;
     g.shells.length = 0; g.missiles.length = 0; g.artillery.length = 0; g.smokes.length = 0; g.grenades.length = 0; g.airstrikes.length = 0;
     g.mines = g.mines.filter(m => m.team === -1); // a mission minefield stays put
-    if (this.convoy) g.tanks.splice(g.tanks.indexOf(this.convoy), 1);
+    const oldAt = this.convoy ? g.tanks.indexOf(this.convoy) : -1;
     const route = this.buildRoute(def);
     let len = 0;
     for (let i = 1; i < route.length; i++) len += dist(route[i - 1].x, route[i - 1].y, route[i].x, route[i].y);
     const c = new Convoy(def, g.teams[def].color, this.convoyHp, route, len / ESCORT.duration);
     c.spawn(route[0].x, route[0].y, Math.atan2(route[1].y - route[0].y, route[1].x - route[0].x));
-    g.tanks.push(c);
+    if (oldAt >= 0) { c.netIdx = g.tanks[oldAt].netIdx; g.tanks[oldAt] = c; } else { c.netIdx = g.tanks.length; g.tanks.push(c); }
     this.convoy = c;
     this.route = route;
     this.extraction = route[route.length - 1];
@@ -695,26 +695,60 @@ class EscortMode extends ModeBase {
 
   onTimeUp() {}
 
+// Escort stations in the truck's own frame, front to back.
+  static SCREEN = [[40, -210], [40, 210], [-130, -180], [-130, 180], [-240, 0], [150, -200], [150, 200], [-330, -140], [-330, 140], [-420, 0]];
+
+  // Hand the forward stations to the crews that are already furthest up the
+  // road, so nobody has to overtake the truck to take its point.
+  screenSlot(t) {
+    const c = this.convoy, ca = Math.cos(c.angle), sa = Math.sin(c.angle);
+    const fwd = x => (x.x - c.x) * ca + (x.y - c.y) * sa;
+    const list = this.game.tanks.filter(x => x.alive && !x.isConvoy && x.team === this.defenders);
+    list.sort((a, b) => fwd(b) - fwd(a));
+    const i = list.indexOf(t);
+    return i < 0 ? 0 : i;
+  }
+
   botGoal(t, brain) {
     const g = this.game, c = this.convoy;
     if (!c || !c.alive || this.state === 'break') {
       const b = g.map.bases[t.team];
       return { x: b.x, y: b.y, r: 300, combat: 'free' };
     }
+    // Positions are in the truck's own frame, so the screen travels with it
+    // instead of trailing behind.
+    const ca = Math.cos(c.angle), sa = Math.sin(c.angle);
+    const local = (fwd, side) => ({ x: c.x + ca * fwd - sa * side, y: c.y + sa * fwd + ca * side });
     if (t.team === this.defenders) {
-      // Escort: ring the truck, fight anything that comes close.
-      const a = (t.id * 2.39996) % TAU;
-      return { x: c.x + Math.cos(a) * 130, y: c.y + Math.sin(a) * 130, r: 50, combat: 'hold', areaX: c.x, areaY: c.y, areaR: 380 };
+      // Point, flanks and rear guard rather than a queue behind the tailgate.
+      // The leading crews scout up the road ahead of the truck, the rest hold
+      // its flanks and tail. Stations travel with the convoy either way.
+      const k = this.screenSlot(t), spread = g.settings.size >= 8 ? 1.25 : 1;
+      let p;
+      if (k < 2) {
+        const i = Math.min(this.route.length - 1, c.routeI + 5 + k * 5);
+        const w = this.route[i], lat = (k === 0 ? -110 : 110) * spread;
+        p = { x: w.x - sa * lat, y: w.y + ca * lat };
+      } else {
+        const spots = EscortMode.SCREEN;
+        const [fwd, side] = spots[(k - 2) % spots.length];
+        p = local(fwd * spread, side * spread);
+      }
+      return { x: p.x, y: p.y, r: 55, combat: 'hold', areaX: p.x, areaY: p.y, areaR: 280 };
     }
-    // Attackers: some set up an ambush further along the route, the rest chase.
+    // Attackers press the truck from different sides. A third of them set up
+    // ahead of it while it's still far off, then join in once it arrives.
     const ctx = brain.ctx;
-    if (ctx.ambush === undefined) ctx.ambush = brain.rng.chance(0.5);
-    if (ctx.ambush && dist(t.x, t.y, c.x, c.y) > 650) {
-      const i = Math.min(this.route.length - 1, c.routeI + 10 + (t.id % 8));
-      const p = this.route[i];
-      return { x: p.x + Math.cos(t.id) * 120, y: p.y + Math.sin(t.id) * 120, r: 60, combat: 'free' };
+    const d = dist(t.x, t.y, c.x, c.y);
+    if (ctx.ambush === undefined) ctx.ambush = brain.rng.chance(0.25);
+    if (ctx.ambush && d > 1100 && (c.progress || 0) < 0.5) {
+      const i = Math.min(this.route.length - 1, c.routeI + 8 + (t.id % 6));
+      const p = this.route[i], a = t.id * 2.39996;
+      return { x: p.x + Math.cos(a) * 150, y: p.y + Math.sin(a) * 150, r: 60, combat: 'free', focus: c };
     }
-    return { x: c.x, y: c.y, r: 260, combat: 'free' };
+    // Close in from different sides and put the truck first.
+    const a = t.id * 2.39996;
+    return { x: c.x + Math.cos(a) * 90, y: c.y + Math.sin(a) * 90, r: 60, combat: 'free', focus: c };
   }
 
   hud() { return { kind: 'escort' }; }

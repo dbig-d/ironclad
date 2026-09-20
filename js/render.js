@@ -700,8 +700,10 @@ class Renderer {
         ctx.fillStyle = '#23211e';
         ctx.fillRect(5, y - 2.1, 3.6, 4.2);
         const loaded = t.grenadeAmmo >= (s < 0 ? 1 : 2) || (t.grenadeAmmo === 0 && ready);
-        ctx.fillStyle = loaded ? '#c9a24a' : '#141311';
-        ctx.beginPath(); ctx.arc(8.6, y, 1.5, 0, TAU); ctx.fill();
+        // A third round waiting shows as a brighter cap.
+        const spare = t.grenadeAmmo >= 3;
+        ctx.fillStyle = loaded ? (spare ? '#e8c35a' : '#c9a24a') : '#141311';
+        ctx.beginPath(); ctx.arc(8.6, y, spare ? 1.8 : 1.5, 0, TAU); ctx.fill();
       }
     } else if (sp === 'smoke') {
       for (const s of [-1, 1]) for (let i = 0; i < 3; i++) {

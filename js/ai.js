@@ -68,6 +68,8 @@ class BotBrain {
     let best = null, bestScore = Infinity, bestLOS = false;
     // Night missions: crews only see what their headlights and flares reach.
     const vision = Math.min(game.mode.vision || 1300, game.visionLimit);
+    // The objective (an escort truck, say) outranks a closer, easier target.
+    const focus = this.goal && this.goal.focus;
     for (const e of game.tanks) {
       if (!e.alive || e.team === t.team) continue;
       const d = dist(t.x, t.y, e.x, e.y);
@@ -79,6 +81,7 @@ class BotBrain {
       let score = d * (los ? 1 : 2.2);
       if (e.carrying) score -= 450;
       if (e.isConvoy) score -= 250;
+      if (focus && e === focus) score -= 700;
       score -= (1 - e.hp / e.maxHp) * 140;
       if (e.shield > 0) score += 350;
       if (e === this.target) score -= 160;
@@ -433,6 +436,8 @@ class BotBrain {
     }
     const w = t.loadout.weapon;
     let desired = w === 'flame' ? 150 : w === 'longgun' || w === 'wire' ? s.range + 170 : s.range;
+    // Pressing the objective: close in rather than plinking at it from the back.
+    if (g && g.focus && e === g.focus) desired = Math.min(desired, 300);
     if (t.hp < t.maxHp * 0.4 && this.rng.next() < s.retreat) desired += 220;
     if (d > desired + (w === 'flame' ? 60 : 130) && this.mode !== 'hold') {
       return this.followPath(e.x, e.y, game);

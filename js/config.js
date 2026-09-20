@@ -114,9 +114,14 @@ const HARDCORE = { rounds: 3, breakTime: 4.5, time: { 1: 100, 2: 130, 4: 160, 10
 // Team modes use the rules of the nearest listed squad size (campaign
 // missions can field uneven teams such as 2v3).
 function rulesSize(n) { return n <= 1 ? 1 : n <= 2 ? 2 : n <= 6 ? 4 : 10; }
+// Free-for-all sizes come from a list; round up to one the maps are built for.
+function ffaSize(mode, n) {
+  const list = mode === 'jug' ? JUG_SIZES : BR_SIZES;
+  return list.find(v => v >= n) || list[list.length - 1];
+}
 
 // Escort: each round the convoy needs about this long to reach extraction.
-const ESCORT = { duration: 135, breakTime: 6, hpBase: 800, hpPerTank: 850 };
+const ESCORT = { duration: 135, breakTime: 6, hpBase: 740, hpPerTank: 700 };
 
 // Juggernaut: one oversized, heavily armed tank that everyone else hunts.
 const JUGGERNAUT = {

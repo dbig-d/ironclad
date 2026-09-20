@@ -55,7 +55,7 @@ class Game {
     this.buildMap();
     this.buildTeams();
     this.mode = new MODE_CLASSES[s.mode](this);
-    this.clock = this.def.teams && s.mode !== 'escort' ? TEAM_RULES[s.size].time : s.mode === 'jug' ? JUGGERNAUT.time : Infinity;
+    this.clock = this.def.teams && s.mode !== 'escort' ? TEAM_RULES[rulesSize(s.size)].time : s.mode === 'jug' ? JUGGERNAUT.time : Infinity;
     if (s.rules && s.rules.time && isFinite(this.clock)) this.clock = s.rules.time;
     this.respawnTime = this.mode.respawnTime || this.def.respawn;
     this.spawnAll();
@@ -92,12 +92,12 @@ class Game {
     const s = this.settings;
     const opts = { seed: s.seed, biome: s.biome, mode: s.mode, recipe: s.recipe || null };
     if (this.def.teams) {
-      const [w, h] = TEAM_RULES[s.size].map;
-      Object.assign(opts, { w, h, layout: 'teams', hillR: { 1: 150, 2: 175, 4: 210, 10: 260 }[s.size] });
+      const [w, h] = TEAM_RULES[rulesSize(s.size)].map;
+      Object.assign(opts, { w, h, layout: 'teams', hillR: { 1: 150, 2: 175, 4: 210, 10: 260 }[rulesSize(s.size)] });
     } else {
       // Juggernaut respawns, so it wants plenty of spread-out spawn points.
       const jug = s.mode === 'jug';
-      const w = jug ? JUGGERNAUT.map[s.size] || 2600 : BR_MAP[s.size];
+      const w = jug ? JUGGERNAUT.map[ffaSize('jug', s.size)] || 2600 : BR_MAP[ffaSize('br', s.size)] || 3200;
       Object.assign(opts, { w, h: Math.round(w * 0.8), layout: 'ffa', spawnCount: jug ? Math.max(12, s.size * 2) : s.size });
     }
     this.map = new GameMap(opts);
@@ -146,7 +146,9 @@ class Game {
         ? (slot >= 0 ? slots[slot].name : humans > 1 ? (pi === 0 ? s.playerName : s.p2Name) || 'P' + (pi + 1) : s.playerName)
         : names[ni++ % names.length];
       const t = new Tank({ name, team, color, isPlayer, skill });
-      t.loadout = this.loadoutFor(isPlayer, side);
+      t.loadout = slot >= 0 && slots[slot].loadout
+        ? Object.assign({}, DEFAULT_LOADOUT, slots[slot].loadout)   // online: the parts that player chose
+        : this.loadoutFor(isPlayer, side);
       if (this.campaign) {
         const up = isPlayer ? s.playerUp || {} : t.loadout.up || {};
         t.hpUp = up.hp || 1;

@@ -24,7 +24,7 @@ const NET = {
   p2pTimeout: 9000,    // give up on a direct connection after this and relay
   interp: 0.12,        // render this far behind the host, in seconds
   codeChars: 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789',
-  modes: ['tdm', 'oneshot', 'koth', 'ctf', 'br'],
+  modes: ['tdm', 'koth', 'ctf', 'oneshot', 'escort', 'hardcore', 'br', 'jug'],
 };
 
 const netId = () => Array.from({ length: 8 }, () => NET.codeChars[(Math.random() * NET.codeChars.length) | 0]).join('');
@@ -164,6 +164,14 @@ class Net {
       setTimeout(() => res('TIMED_OUT'), 12000);
     });
     if (status !== 'SUBSCRIBED') throw new Error('no-room');
+    // The code has to keep working between matches: rejoin the channel if it drops.
+    clearInterval(this.roomT);
+    this.roomT = setInterval(() => {
+      const ch = this.channel;
+      if (!ch || !this.active) return;
+      const st = String(ch.state || '').toLowerCase();
+      if (st === 'closed' || st === 'errored') { try { ch.subscribe(); } catch (e) { /* retried next tick */ } }
+    }, 8000);
   }
 
   sig(msg) {
@@ -226,6 +234,7 @@ class Net {
   }
 
   leave(quiet) {
+    clearInterval(this.roomT);
     if (!quiet && this.channel) this.sig({ t: 'bye' });
     this.reset();
     try { if (this.channel) this.channel.unsubscribe(); } catch (e) {}
@@ -242,7 +251,6 @@ class Net {
     if (!m || m.from === this.me) return;
     if (m.to && m.to !== this.me) return;
     if (m.t === 'hello' && this.isHost) {
-      if (this.state !== 'lobby') return this.sig({ t: 'busy', to: m.from });
       if (this.peers.size + 1 >= NET.maxPlayers) return this.sig({ t: 'full', to: m.from });
       const peer = new NetPeer(this, m.from, (m.name || 'Player').slice(0, 14), true);
       peer.team = (this.peers.size + 1) % 2;
@@ -278,7 +286,7 @@ class Net {
       this.sendLobby();
     } else {
       this.state = 'lobby';
-      peer.send({ t: 'name', name: this.name });
+      peer.send({ t: 'name', name: this.name, loadout: this.app.ui.settings.loadout });
     }
     this.app.ui.renderOnline();
   }
@@ -299,15 +307,16 @@ class Net {
 
   // ---- lobby ---------------------------------------------------------------------------
   refreshRoster() {
-    const rows = [{ id: this.me, name: this.name, team: this.myTeam || 0, you: true, host: this.isHost, mode: 'host', ping: 0 }];
-    for (const p of this.peers.values()) rows.push({ id: p.id, name: p.name, team: p.team, you: false, host: false, mode: p.mode, ping: Math.round(p.ping) });
+    const mine = this.app.ui.settings.loadout;
+    const rows = [{ id: this.me, name: this.name, team: this.myTeam || 0, you: true, host: this.isHost, mode: 'host', ping: 0, loadout: mine }];
+    for (const p of this.peers.values()) rows.push({ id: p.id, name: p.name, team: p.team, you: false, host: false, mode: p.mode, ping: Math.round(p.ping), loadout: p.loadout });
     this.roster = rows;
   }
 
   sendLobby() {
     if (!this.isHost) return;
     this.refreshRoster();
-    const msg = { t: 'lobby', roster: this.roster.map(r => ({ id: r.id, name: r.name, team: r.team, host: r.host })), set: this.lobby };
+    const msg = { t: 'lobby', roster: this.roster.map(r => ({ id: r.id, name: r.name, team: r.team, host: r.host })), set: this.lobby, busy: this.state === 'playing' };
     for (const p of this.peers.values()) p.send(msg);
   }
 
@@ -332,27 +341,37 @@ class Net {
     if (!this.isHost || this.state !== 'lobby') return;
     const L = this.lobby, team = MODES[L.mode].teams;
     const players = this.roster.slice(0, NET.maxPlayers);
-    const size = team ? Math.max(L.size, Math.ceil(players.length / 2)) : Math.max(L.size, players.length);
     const slots = [];
+    let size;
     if (team) {
+      // Everyone gets their own tank: grow the squad to fit the fuller side.
       const used = [0, 0];
       for (const r of players) {
         const t = clamp(r.team | 0, 0, 1);
-        const idx = used[t]++;
-        slots.push({ id: r.id, name: r.name, team: t, idx: Math.min(idx, size - 1) });
+        slots.push({ id: r.id, name: r.name, team: t, idx: used[t]++, loadout: r.loadout });
       }
+      size = rulesSize(Math.max(L.size, used[0], used[1]));
     } else {
-      players.forEach((r, i) => slots.push({ id: r.id, name: r.name, team: i, idx: i }));
+      size = ffaSize(L.mode, Math.max(L.size, players.length));
+      players.forEach((r, i) => slots.push({ id: r.id, name: r.name, team: i, idx: i, loadout: r.loadout }));
     }
     const settings = {
       mode: L.mode, size, hits: L.hits, difficulty: L.difficulty,
       biome: L.biome === 'random' ? randPick(BIOME_IDS) : L.biome,
       seed: (Math.random() * 1e9) >>> 0,
-      progression: 'standard', netSlots: slots,
+      progression: L.progression || 'standard', botLoadout: L.progression === 'freeplay' ? L.botLoadout || 'standard' : 'standard',
+      netSlots: slots,
     };
+    // Build our own world first: if anything goes wrong, the room stays usable.
+    try {
+      this.app.startOnline(settings, 'host');
+    } catch (e) {
+      console.error(e);
+      this.app.ui.toast('That combination could not start. Try another mode or size.');
+      return;
+    }
     this.state = 'playing';
     for (const p of this.peers.values()) p.send({ t: 'start', s: settings });
-    this.app.startOnline(settings, 'host');
   }
 
   // ---- messages between peers -----------------------------------------------------------
@@ -363,6 +382,7 @@ class Net {
     switch (m.t) {
       case 'name':
         peer.name = (m.name || 'Player').slice(0, 14);
+        peer.loadout = m.loadout || null;
         this.refreshRoster();
         this.sendLobby();
         this.app.ui.renderOnline();
@@ -370,6 +390,7 @@ class Net {
       case 'lobby':
         this.roster = m.roster.map(r => ({ ...r, you: r.id === this.me, mode: peer.mode, ping: Math.round(peer.ping) }));
         this.lobby = m.set;
+        this.hostBusy = !!m.busy;
         if (this.state === 'playing') { this.state = 'lobby'; this.app.backToLobby(true); }
         this.app.ui.renderOnline();
         break;
@@ -389,6 +410,15 @@ class Net {
         break;
       case 'pong':
         peer.ping = performance.now() - m.at;
+        break;
+      case 'offer':
+        if (this.isClient) {
+          const p = this.app.game && this.app.game.locals[0];
+          if (p) p.offer = m.o ? { options: m.o.opts.map(o => ({ slot: o[0], id: o[1] })), expires: this.app.game.time + m.o.time, level: m.o.lv } : null;
+        }
+        break;
+      case 'pick':
+        if (this.isHost && peer.tank && peer.tank.offer) this.app.game.pickOffer(peer.tank, m.k);
         break;
       case 'over':
         if (this.isClient) this.app.onlineMatchOver(m);
@@ -420,6 +450,19 @@ class Net {
   }
 
   hostFrame(dt, game) {
+    // Upgrade choices belong to one player: send them straight to that seat.
+    for (const p of this.peers.values()) {
+      const t = p.tank;
+      if (!t) continue;
+      const o = t.offer;
+      if (o && p.sentOffer !== o) {
+        p.sentOffer = o;
+        p.send({ t: 'offer', o: { lv: o.level, time: Math.max(0, o.expires - game.time), opts: o.options.map(x => [x.slot, x.id]) } });
+      } else if (!o && p.sentOffer) {
+        p.sentOffer = null;
+        p.send({ t: 'offer', o: null });
+      }
+    }
     this.sendT -= dt;
     const fastest = [...this.peers.values()].every(p => p.mode === 'p2p');
     if (this.sendT > 0) return;
@@ -434,8 +477,9 @@ class Net {
     const tk = [];
     for (const t of g.tanks) {
       tk.push([t.netIdx, Math.round(t.x), Math.round(t.y), Math.round(t.angle * 100), Math.round(t.turret * 100),
-        Math.round(t.hp), (t.alive ? 1 : 0) | (t.input.fire ? 2 : 0) | (t.boostT > 0 ? 4 : 0) | (t.burnT > 0 ? 8 : 0) | (t.repairing ? 16 : 0),
-        Math.round(t.treadL), Math.round(t.treadR), Math.round(t.missileCharge)]);
+        Math.round(t.hp), (t.alive ? 1 : 0) | (t.input.fire ? 2 : 0) | (t.boostT > 0 ? 4 : 0) | (t.burnT > 0 ? 8 : 0) | (t.repairing ? 16 : 0) | (t.jug ? 32 : 0),
+        Math.round(t.treadL), Math.round(t.treadR), Math.round(t.missileCharge),
+        Math.round(t.score || 0), t.level || 1, Math.round(t.stats.xp || 0), Math.round(t.maxHp)]);
     }
     const sh = g.shells.map(s => [Math.round(s.x), Math.round(s.y), Math.round(s.angle * 100), SHELL_NET.indexOf(s.kind), Math.round(s.speed)]);
     const ms = g.missiles.map(m => [Math.round(m.x), Math.round(m.y), Math.round(m.angle * 100), MISSILE_NET.indexOf(m.kind), m.owner ? m.owner.netIdx : -1, Math.round((m.blink || 0) * 100)]);
@@ -451,6 +495,11 @@ class Net {
     const o = { ph: g.phase, cl: Math.round(g.clock), sc: g.teams.map(t => Math.round(t.score)), it: Math.round(g.introT * 10), ot: Math.round(g.overT * 10), wn: g.winner };
     const m = g.mode;
     if (m instanceof KOTHMode) o.k = [m.owner, Math.round(m.progress * 100), m.contested ? 1 : 0, m.capTeam === undefined ? -1 : m.capTeam];
+    else if (m instanceof EscortMode) o.e = [m.state === 'break' ? 1 : 0, m.round, Math.round(m.breakT * 10), Math.round(m.eta * 10), Math.round(m.roundTime * 10),
+      m.convoy ? Math.round((m.convoy.progress || 0) * 1000) : 0, m.convoy ? m.convoy.netIdx : -1, m.convoy ? m.convoy.team : 0,
+      m.results.map(r => [r.attackers, r.destroyed ? 1 : 0, Math.round(r.time * 10), Math.round(r.damage)])];
+    else if (m instanceof HardcoreMode) o.h = [m.state === 'break' ? 1 : 0, m.round, Math.round(m.breakT * 10), Math.round(m.roundTime * 10), m.history];
+    else if (m instanceof JuggernautMode) o.j = [m.jug ? m.jug.netIdx : -1, m.overtime ? 1 : 0];
     else if (m instanceof CTFMode) o.f = m.flags.map(f => [Math.round(f.x), Math.round(f.y), f.carrier ? f.carrier.netIdx : -1, f.home ? 1 : 0, Math.round((f.dropT || 0) * 10)]);
     else if (m instanceof BRMode) o.z = [Math.round(m.zone.x), Math.round(m.zone.y), Math.round(m.zone.r), Math.round(m.zone.tx), Math.round(m.zone.ty), Math.round(m.zone.tr), m.phase, m.state === 'shrink' ? 1 : 0, Math.round(m.timer * 10)];
     return o;
@@ -492,6 +541,7 @@ class Net {
   }
 
   onSnapshot(m) {
+    this.lastSnap = performance.now();
     m.at = performance.now();
     this.snapBuf.push(m);
     if (this.snapBuf.length > 12) this.snapBuf.shift();
@@ -505,13 +555,24 @@ class Net {
         if (v && typeof v === 'object' && v.$ !== undefined) { const t = g.tanks[v.$]; if (!t) { ev.__drop = true; continue; } ev[k] = t; }
         else ev[k] = v;
       }
-      if (!ev.__drop) g.events.push(ev);
+      if (ev.__drop) continue;
+      // Upgrades repaint the tank, so apply the part before the effects play.
+      if (ev.type === 'upgrade' && ev.tank && ev.slot) { ev.tank.loadout[ev.slot] = ev.id; ev.tank.recalc(g.baseHp); }
+      g.events.push(ev);
     }
   }
 
   // Rebuild the world from the two snapshots either side of "now minus a little".
   clientFrame(dt, g) {
     const buf = this.snapBuf;
+    // Nothing from the host for a while: back to the room rather than a frozen battlefield.
+    if (this.lastSnap && performance.now() - this.lastSnap > 9000) {
+      this.lastSnap = 0;
+      this.state = 'lobby';
+      this.app.backToLobby(true);
+      this.app.ui.toast('Lost the connection to the host.');
+      return;
+    }
     if (!buf.length) return;
     const now = performance.now() - NET.interp * 1000;
     let a = buf[0], b = buf[buf.length - 1];
@@ -537,6 +598,14 @@ class Net {
       t.repairing = !!(flags & 16);
       t.treadL = row[7]; t.treadR = row[8];
       t.missileCharge = row[9];
+      t.score = row[10];
+      t.level = row[11];
+      t.stats.xp = row[12];
+      const wasJug = t.jug;
+      t.jug = !!(flags & 32);
+      // The Juggernaut is bigger and tougher: rebuild those numbers when it changes hands.
+      if (t.jug !== wasJug) { t.jugHpMul = row[13] / Math.max(1, g.baseHp); t.recalc(g.baseHp); }
+      t.maxHp = row[13];
       if (!wasAlive && t.alive) { t.x = px; t.y = py; }        // respawned: no sliding in from the grave
       if (t === mine && t.alive) { this.reconcile(t, px, py, pa); continue; }
       t.x = px; t.y = py; t.angle = pa; t.turret = pt;
@@ -570,6 +639,20 @@ class Net {
     o.sc.forEach((v, i) => { if (g.teams[i]) g.teams[i].score = v; });
     const m = g.mode;
     if (o.k && m instanceof KOTHMode) { m.owner = o.k[0]; m.progress = o.k[1] / 100; m.contested = !!o.k[2]; m.capTeam = o.k[3] < 0 ? undefined : o.k[3]; }
+    else if (o.e && m instanceof EscortMode) {
+      m.state = o.e[0] ? 'break' : 'round';
+      m.round = o.e[1]; m.breakT = o.e[2] / 10; m.eta = o.e[3] / 10; m.roundTime = o.e[4] / 10;
+      m.convoy = o.e[6] >= 0 ? g.tanks[o.e[6]] : null;
+      if (m.convoy) m.convoy.progress = o.e[5] / 1000;
+      m.results = o.e[8].map(r => ({ attackers: r[0], destroyed: !!r[1], time: r[2] / 10, damage: r[3] }));
+      if (m.convoy && m.convoy.team !== o.e[7]) { m.convoy.team = o.e[7]; m.convoy.color = g.teams[o.e[7]].color; }
+    } else if (o.h && m instanceof HardcoreMode) {
+      m.state = o.h[0] ? 'break' : 'round';
+      m.round = o.h[1]; m.breakT = o.h[2] / 10; m.roundTime = o.h[3] / 10; m.history = o.h[4];
+    } else if (o.j && m instanceof JuggernautMode) {
+      m.jug = o.j[0] >= 0 ? g.tanks[o.j[0]] : null;
+      m.overtime = !!o.j[1];
+    }
     else if (o.f && m instanceof CTFMode) o.f.forEach((r, i) => { const f = m.flags[i]; if (!f) return; f.x = r[0]; f.y = r[1]; f.carrier = r[2] >= 0 ? g.tanks[r[2]] : null; f.home = !!r[3]; f.dropT = r[4] / 10; });
     else if (o.z && m instanceof BRMode) { const z = m.zone; z.x = o.z[0]; z.y = o.z[1]; z.r = o.z[2]; z.tx = o.z[3]; z.ty = o.z[4]; z.tr = o.z[5]; m.phase = o.z[6]; m.state = o.z[7] ? 'shrink' : 'wait'; m.timer = o.z[8] / 10; }
     // Carried flags ride along with their carrier.
@@ -593,5 +676,5 @@ class Net {
 const SHELL_NET = ['shell', 'bullet', 'flame', 'long', 'hesh', 'coax'];
 const MISSILE_NET = ['missile', 'rocket', 'salvo', 'wire'];
 // Events that are either local-only or rebuilt from the snapshot itself.
-const NET_SKIP_EVENTS = new Set(['missile_ready', 'levelup', 'upgrade']);
+const NET_SKIP_EVENTS = new Set(['missile_ready']);
 const NET_REF_FIELDS = new Set(['tank', 'target', 'shooter', 'victim', 'killer', 'owner', 'missile', 'strike']);

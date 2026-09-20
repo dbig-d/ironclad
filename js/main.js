@@ -125,6 +125,12 @@ const App = {
     t.settle(dt);
   },
 
+  // Upgrade choices are the host's to apply; a joiner asks for one.
+  pickOffer(p, k) {
+    if (this.net.isClient) this.net.everyPeer({ t: 'pick', k });
+    this.game.pickOffer(p, k);
+  },
+
   onlinePlayerLeft(peer) {
     if (peer.tank) {
       // Hand the empty seat to the computer so the match can finish.
@@ -298,7 +304,7 @@ const App = {
     if (playing && !this.paused) humans.forEach((p, i) => {
       if (!p.offer) return;
       const k = inp.pickPressed(i, coop);
-      if (k >= 0) { g.pickOffer(p, k); this.sfx.play('click'); }
+      if (k >= 0) { this.pickOffer(p, k); this.sfx.play('click'); }
     });
 
     if (simulate && this.net.isClient && playing) {

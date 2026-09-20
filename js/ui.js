@@ -22,6 +22,13 @@ const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.2l2
 const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII'];
 
 const SETTINGS_KEY = 'ironclad.settings.v1';
+// What each progression means in the online lobby.
+const PROG_HINT = {
+  standard: 'Everyone drives the standard tank.',
+  leveling: 'Earn XP during the match and pick upgrades as you go.',
+  freeplay: 'Everyone brings the loadout they built in Skirmish \u00b7 Freeplay.',
+};
+
 // Per-player key labels for the HUD panels (single player uses the mouse).
 const PANEL_KEYS = {
   solo: { missile: 'RMB', auto: 'R' },
@@ -378,12 +385,14 @@ class UI {
         ${team ? `<span class="on-teams">${[0, 1].map(t => `<button type="button" class="${r.team === t ? 'on' : ''}" data-team="${t}" data-id="${r.id}" ${host ? '' : 'disabled'}>${t === 0 ? 'A' : 'B'}</button>`).join('')}</span>` : ''}
       </div>`).join('');
     el.innerHTML = `${host ? `<div class="on-codebox"><span class="label">Room code</span><b>${net.code}</b><button type="button" class="btn ghost small" id="on-copy">Copy</button></div>`
-        : `<p class="on-wait">Room ${net.code} \u00b7 waiting for the host to start</p>`}
+        : `<p class="on-wait">Room ${net.code} · ${net.hostBusy ? 'a match is running · you play the next one' : 'waiting for the host to start'}</p>`}
       <div class="on-players">${rows}</div>
       ${host ? `<section class="field"><h2 class="label">Operation</h2><div class="seg" id="on-mode"></div></section>
         <section class="field split"><div><h2 class="label">Squad size</h2><div class="seg" id="on-size"></div></div>
-          <div><h2 class="label">Armor</h2><div class="seg" id="on-hits"></div></div></section>`
-        : `<p class="hint">${MODES[L.mode].name} \u00b7 ${team ? L.size + 'v' + L.size : L.size + ' tanks'} \u00b7 ${L.hits} hits</p>`}
+          <div><h2 class="label">Armor</h2><div class="seg" id="on-hits"></div></div></section>
+        <section class="field"><h2 class="label">Progression</h2><div class="seg" id="on-prog"></div>
+          <p class="hint">${PROG_HINT[L.progression || 'standard']}</p></section>`
+        : `<p class="hint">${MODES[L.mode].name} \u00b7 ${team ? L.size + 'v' + L.size : L.size + ' tanks'} \u00b7 ${L.hits} hits \u00b7 ${(L.progression || 'standard')}</p>`}
       <div class="on-foot">
         ${host ? '<button type="button" class="btn big" id="on-start">Start match</button>' : ''}
         <button type="button" class="btn ghost" id="on-leave">Leave</button>
@@ -395,8 +404,11 @@ class UI {
         else this.toast('Room code: ' + net.code);
       });
       this.radio($('on-mode'), NET.modes.map(id => ({ value: id, label: MODES[id].name })), L.mode, v => net.setLobby({ mode: v }), it => it.label);
-      const sizes = MODES[L.mode].teams ? [1, 2, 4] : [4, 6, 10];
-      this.radio($('on-size'), sizes.map(n => ({ value: n, label: MODES[L.mode].teams ? n + 'v' + n : n + ' tanks' })), sizes.includes(L.size) ? L.size : sizes[1], v => net.setLobby({ size: v }), it => it.label);
+      this.radio($('on-prog'), [{ value: 'standard', label: 'Standard' }, { value: 'leveling', label: 'Leveling' }, { value: 'freeplay', label: 'Freeplay' }],
+        L.progression || 'standard', v => net.setLobby({ progression: v }), it => it.label);
+      const teams = MODES[L.mode].teams;
+      const sizes = teams ? [1, 2, 4] : L.mode === 'jug' ? JUG_SIZES : [6, 10, 20];
+      this.radio($('on-size'), sizes.map(n => ({ value: n, label: teams ? n + 'v' + n : n + ' tanks' })), sizes.includes(L.size) ? L.size : sizes[1], v => net.setLobby({ size: v }), it => it.label);
       this.radio($('on-hits'), [5, 7, 9].map(n => ({ value: n, label: n + ' hits' })), L.hits, v => net.setLobby({ hits: v }), it => it.label);
       $('on-start').addEventListener('click', () => { this.app.sfx.play('click'); net.start(); });
       el.querySelectorAll('.on-teams button').forEach(b => b.addEventListener('click', () => net.setTeam(b.dataset.id, +b.dataset.team)));
@@ -615,7 +627,7 @@ class UI {
         const picks = two ? PANEL_KEYS.two[i].picks : PANEL_KEYS.solo.picks;
         el.innerHTML = `<div class="offer-head"><span class="offer-lvl">Level ${o.level}</span><span class="offer-sub">${two ? esc(p.name) + ' · ' : ''}Choose an upgrade · invulnerable briefly</span><span class="offer-timer"><i></i></span></div>
           <div class="offer-cards">${o.options.map((op, k) => `<button type="button" class="offer-card" data-k="${k}">${partIcon(op.id)}<span class="oc-slot">${SLOT_NAMES[op.slot]}</span><span class="oc-name">${PARTS[op.slot][op.id].name}</span><span class="oc-desc">${PARTS[op.slot][op.id].desc}</span><kbd>${picks[k]}</kbd></button>`).join('')}</div>`;
-        el.querySelectorAll('.offer-card').forEach(b => b.addEventListener('click', () => { game.pickOffer(p, +b.dataset.k); this.app.sfx.play('click'); }));
+        el.querySelectorAll('.offer-card').forEach(b => b.addEventListener('click', () => { this.app.pickOffer(p, +b.dataset.k); this.app.sfx.play('click'); }));
         $('offers').appendChild(el);
         this.offerEls[i] = el;
         // Cards take clicks only after a moment, so a panel popping up mid-fight doesn't eat shots.
@@ -643,7 +655,7 @@ class UI {
     const ready = mf >= 1;
     const spName = PART_SHORT[p.loadout.special];
     const msTxt = p.boostT > 0 ? 'Overdrive' : p.repairT > 0 ? 'Repairing' : p.flakT > 0 ? 'Anti-air · ' + Math.ceil(p.flakT) + 's'
-      : p.grenadeAmmo > 0 ? 'Grenades · 1 loaded' : ready ? spName + ' ready' : spName;
+      : p.grenadeAmmo > 0 ? 'Grenades · ' + p.grenadeAmmo + ' left' : ready ? spName + ' ready' : spName;
     el.msRow.classList.toggle('ready', ready || p.grenadeAmmo > 0);
     if (el.msLbl.textContent !== msTxt) el.msLbl.textContent = msTxt;
     if (el.xpFill) {

@@ -46,7 +46,7 @@ const PARTS = {
     overdrive: { name: 'Engine Overdrive', desc: 'Four seconds of +55% speed and sharper turning.', cost: 120, price: 650 },
     airstrike: { name: 'Airstrike', desc: 'A fighter-bomber walks heavy bombs through the spot you mark. Mark a tank and the pilot follows it in.', cost: 280, price: 1400 },
     flak:      { name: 'Anti-Air Rounds', desc: 'For 15 seconds an automatic gun tries to shoot down missiles, rockets, grenades and shells coming in near you.', cost: 170, price: 900 },
-    grenades:  { name: 'Grenade Launcher', desc: 'Two grenades per charge. They bounce off walls and burst a moment later.', cost: 140, price: 950 },
+    grenades:  { name: 'Grenade Launcher', desc: 'Three grenades per charge. They bounce off walls and burst a moment later.', cost: 160, price: 950 },
     salvo:     { name: 'Quad Missiles', desc: 'Four rockets from rear pods fire straight ahead of your hull, two down each side. 30 damage each.', cost: 190, price: 1200 },
   },
 };
@@ -69,7 +69,7 @@ const COAX = { interval: 0.18, damage: 2, jitter: 0.05 };
 const WIRE = { damage: 55, spread: 12, splashRadius: 50, splashDamage: 12, speed0: 250, speed: 380, life: 3.6, turn: 3.2, lead: 160 };
 // Quad missile rockets and grenades.
 const SALVO = { damage: 30, spread: 5, splashRadius: 68, splashDamage: 15, speed0: 420, speed: 640, range: 900, gap: 0.08, converge: 0.04 };
-const GRENADE = { speed: 540, fuse: 1.3, radius: 70, damage: 32, edge: 6, drag: 1.5, bounce: 0.62, size: 6, ammo: 2 };
+const GRENADE = { speed: 540, fuse: 1.3, radius: 70, damage: 32, edge: 6, drag: 1.5, bounce: 0.62, size: 6, ammo: 3 };
 const AIRSTRIKE = { delay: 2.2, length: 500, bombs: 7, radius: 82, damage: 58, edge: 14, planeSpeed: 950, range: 1200, track: 240, commit: 0.8 };
 const FLAK = { time: 15, radius: 200, rate: 0.5, hit: 0.7 };
 
