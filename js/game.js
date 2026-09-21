@@ -138,19 +138,23 @@ class Game {
     // One Shot: a single armor segment and any hit kills (see damage()).
     this.baseHp = this.oneShot ? TANK.shellDamage : clamp(s.hits, HITS.min, HITS.max) * TANK.shellDamage;
     // Campaign: which side a tank fights on decides its skill and tech tier.
+    // Campaign: your own crews drive the allied tanks.
+    const crews = (s.allyCrews || []).slice();
     const makeTank = (team, color, isPlayer, roleIdx, slot = -1) => {
       const side = this.def.teams ? (team === 0 ? 'ally' : 'enemy') : 'enemy';
-      const skill = isPlayer ? null : this.pickSkill(side);
+      const crew = !isPlayer && side === 'ally' && crews.length ? crews.shift() : null;
+      const skill = isPlayer ? null : crew ? SKILLS[clamp(crew.skill - 1, 0, SKILLS.length - 1)] : this.pickSkill(side);
       const pi = this.players.length;
       const name = isPlayer
         ? (slot >= 0 ? slots[slot].name : humans > 1 ? (pi === 0 ? s.playerName : s.p2Name) || 'P' + (pi + 1) : s.playerName)
-        : names[ni++ % names.length];
+        : crew ? crew.name : names[ni++ % names.length];
       const t = new Tank({ name, team, color, isPlayer, skill });
       t.loadout = slot >= 0 && slots[slot].loadout
         ? Object.assign({}, DEFAULT_LOADOUT, slots[slot].loadout)   // online: the parts that player chose
         : this.loadoutFor(isPlayer, side);
+      if (crew) t.loadout = Object.assign({}, DEFAULT_LOADOUT, crew.loadout);
       if (this.campaign) {
-        const up = isPlayer ? s.playerUp || {} : t.loadout.up || {};
+        const up = isPlayer ? s.playerUp || {} : crew ? crew.up || {} : t.loadout.up || {};
         t.hpUp = up.hp || 1;
         t.dmgUp = up.dmg || 1;
         delete t.loadout.up;

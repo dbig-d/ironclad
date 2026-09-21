@@ -632,7 +632,7 @@ class WorldMap {
     ctx.fillStyle = '#26231f';
     roundRectPath(ctx, -30, -22, 60, 10, 3); ctx.fill();
     roundRectPath(ctx, -30, 12, 60, 10, 3); ctx.fill();
-    ctx.drawImage(TankArt.hull(TEAM_COLORS[0], this.save.equip.hull), -HULL_W / 2, -HULL_H / 2, HULL_W, HULL_H);
+    ctx.drawImage(TankArt.hull(TEAM_COLORS[0], this.save.army[0].equip.hull), -HULL_W / 2, -HULL_H / 2, HULL_W, HULL_H);
     ctx.drawImage(art.barrel, 0, -BARREL_H / 2, BARREL_W, BARREL_H);
     ctx.drawImage(art.turret, -(TURRET_W / 2 - 4), -TURRET_H / 2, TURRET_W, TURRET_H);
     ctx.restore();

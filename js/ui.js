@@ -134,7 +134,7 @@ class UI {
       standard: 'Everyone drives the standard tank.',
       leveling: 'Earn XP in the match to unlock part upgrades as you go.',
       freeplay: 'Build your own tank from every part.',
-      campaign: 'Missions across a connected world map. Earn money and stars, and outfit your tank in the hangar.',
+      campaign: 'Missions across a connected world map. Earn money and stars, and build up an army of ten crews.',
     }[s.progression];
     for (const el of document.querySelectorAll('.std-only')) el.hidden = camp;
     $('name-p2').hidden = s.party === 'solo' || camp;
@@ -967,8 +967,11 @@ class UI {
     const { ev, pay } = camp;
     $('ec-stars').innerHTML = ev.flags.map((on, i) => `<span class="ec-star${on ? ' on' : ''}" style="animation-delay:${0.25 + i * 0.35}s">${STAR_SVG}</span>`).join('');
     $('ec-conds').innerHTML = ev.conds.map((c, i) => `<li class="${c.ok ? 'ok' : ''}"><span class="ec-mark">${c.ok ? '✓' : '✗'}</span>${esc(c.text)}${pay.stars[i] && !c.ok ? '<small>earned before</small>' : ''}</li>`).join('');
-    $('ec-pay').innerHTML = pay.lines.map(([k, v]) => `<div><span>${esc(k)}</span><b>+${fmtMoney(v)}</b></div>`).join('') +
-      `<div class="ec-total"><span>Total · balance ${fmtMoney(this.cp.money)}</span><b>+${fmtMoney(pay.total)}</b></div>`;
+    $('ec-pay').innerHTML = pay.lines.map(([k, v, note]) => `<div${note ? ' class="ec-xp"' : ''}><span>${esc(k)}</span><b>+${note ? esc(note) : fmtMoney(v)}</b></div>`).join('') +
+      `<div class="ec-total"><span>Total · balance ${fmtMoney(this.cp.money)}</span><b>+${fmtMoney(pay.total)}</b></div>` +
+      (pay.promotions.length
+        ? `<div class="ec-promos">${pay.promotions.map(p => `<span><b>${esc(p.name)}</b> promoted to ${esc(p.rank)}</span>`).join('')}</div>`
+        : '');
     ev.flags.forEach((on, i) => { if (on) setTimeout(() => this.app.sfx.play('star'), 250 + i * 350); });
     setTimeout(() => this.app.sfx.play('coin'), 350 + ev.flags.length * 350);
   }
@@ -1025,6 +1028,7 @@ class UI {
     const conds = ['Win the mission', ...L.stars.map(condText)];
     el.innerHTML = head +
       `<h3 class="br-name">${L.boss ? '<span class="br-boss">Boss</span>' : `<span class="br-num">${L.order + 1}</span>`}${esc(L.name)}</h3>
+      <p class="br-squad"><span>Commits <b>${missionSlots(L)}</b> tank${missionSlots(L) === 1 ? '' : 's'}</span><span>${missionCrews(this.cp, L).map(c => esc(c.name)).join(' · ')}</span></p>
       <div class="br-mode">${ICONS[L.mode]}<span>${m.name}</span><b>${size}</b></div>
       <p class="br-text">${esc(L.brief)}</p>
       ${twists.length ? `<ul class="br-twists">${twists.map(t => `<li><b>${t.name}</b>${esc(t.desc)}</li>`).join('')}</ul>` : ''}
@@ -1036,20 +1040,24 @@ class UI {
     if (open) $('cp-deploy').addEventListener('click', () => this.app.startMission(L));
   }
 
-  // ---- hangar ----------------------------------------------------------------------------------
+  // ---- army ------------------------------------------------------------------------------------
+  // The crew whose tank is on the turntable.
+  crew() { return this.cp.army[clamp(this.armySel | 0, 0, this.cp.army.length - 1)]; }
+
   showHangar() {
     $('campaign').hidden = true;
     $('hangar').hidden = false;
     this.hgSel = null;
+    if (this.armySel === undefined) this.armySel = 0;
     if (!this.preview) this.preview = new HangarPreview($('hg-preview'));
     this.preview.resize();
     this.renderHangar();
   }
 
   // Numbers for the stat panel from a loadout plus the workshop upgrades.
-  buildStats(L, save) {
+  buildStats(L, c) {
     const hull = PARTS.hull[L.hull], tire = PARTS.tires[L.tires], w = L.weapon;
-    const hp = 140 * hull.hpMul * (1 + UPGRADES.hp * save.armor), dm = 1 + UPGRADES.dmg * save.gun;
+    const hp = 140 * hull.hpMul * (1 + UPGRADES.hp * c.armor), dm = 1 + UPGRADES.dmg * c.gun;
     const shot = { cannon: 20, double: 40, twin: 40, mg: 6, bazooka: 46, flame: 3, longgun: 32, coax: 20, hesh: HESH.damage + HESH.splashDamage, wire: WIRE.damage }[w] * dm;
     const dps = w === 'flame' ? (FLAME.damage / PARTS.weapon.flame.reload + FLAME.burn) * dm
       : w === 'coax' ? (shot / PARTS.weapon.coax.reload + COAX.damage / COAX.interval * 0.85 * dm)
@@ -1059,14 +1067,15 @@ class UI {
   }
 
   renderHangar() {
-    const save = this.cp, E = save.equip, sel = this.hgSel;
+    const save = this.cp, c = this.crew(), E = c.equip, sel = this.hgSel;
     const P = sel ? Object.assign({}, E, { [sel.slot]: sel.id }) : E;
     this.renderWallet();
+    this.renderArmyList();
     this.preview.setLoadout(P);
     $('hg-previewing').hidden = !sel;
     if (sel) $('hg-previewing').innerHTML = `Previewing <b>${PARTS[sel.slot][sel.id].name}</b>`;
     // Stats of the build on the turntable, with the change from what's fitted now.
-    const now = this.buildStats(E, save), nx = this.buildStats(P, save);
+    const now = this.buildStats(E, c), nx = this.buildStats(P, c);
     const bar = (v, max) => `<span class="hg-bar"><i style="width:${clamp(v / max, 0, 1) * 100}%"></i></span>`;
     const delta = (a, b, fmt = Math.round) => {
       if (!sel || Math.abs(b - a) < 0.5) return '';
@@ -1082,7 +1091,7 @@ class UI {
     // Workshop upgrades.
     const ups = [['armor', 'Armor plating', `+${Math.round(UPGRADES.hp * 100)}% armor per level`], ['gun', 'Gun calibre', `+${Math.round(UPGRADES.dmg * 100)}% damage per level`]];
     $('hg-ups').innerHTML = ups.map(([key, name, desc]) => {
-      const lv = save[key], cost = upgradeCost(lv), max = lv >= UPGRADES.max;
+      const lv = c[key], cost = upgradeCost(lv), max = lv >= UPGRADES.max;
       return `<div class="hg-up"><div><b>${name}</b><small>${desc}</small></div>
         <span class="hg-pips">${Array.from({ length: UPGRADES.max }, (_, i) => `<i class="${i < lv ? 'on' : ''}"></i>`).join('')}</span>
         <button type="button" class="btn small${max || cost > save.money ? ' off' : ''}" data-up="${key}">${max ? 'Maxed' : 'Upgrade · ' + fmtMoney(cost)}</button></div>`;
@@ -1092,7 +1101,7 @@ class UI {
     this.radio($('hg-tabs'), SLOTS.map(sl => ({ value: sl, label: SLOT_NAMES[sl] })), this.hgTab, v => { this.hgTab = v; this.hgSel = null; this.renderHangar(); }, it => it.label);
     const slot = this.hgTab;
     $('hg-parts').innerHTML = Object.keys(PARTS[slot]).map(id => {
-      const part = PARTS[slot][id], owned = save.owned[slot].includes(id), eq = E[slot] === id;
+      const part = PARTS[slot][id], owned = c.owned[slot].includes(id), eq = E[slot] === id;
       const tag = eq ? 'Equipped' : owned ? 'Owned' : fmtMoney(part.price);
       const cls = 'hg-part' + (eq ? ' eq' : owned ? ' own' : part.price > save.money ? ' poor' : '') + (sel && sel.slot === slot && sel.id === id ? ' sel' : '');
       return `<button type="button" class="${cls}" data-id="${id}" aria-pressed="${!!(sel && sel.id === id)}">${partIcon(id)}<span class="hp-name">${part.name}</span><span class="hp-desc">${part.desc}</span><span class="hp-tag">${tag}</span></button>`;
@@ -1101,14 +1110,74 @@ class UI {
     this.renderHangarAction();
   }
 
+  // The roster strip: pick whose tank you're working on, name your crews, and
+  // choose who drives out next.
+  renderArmyList() {
+    const save = this.cp, level = this.briefLevel || CAMPAIGN_LEVELS[frontierLevel(save)];
+    const slots = level ? missionSlots(level) : 1;
+    const squad = missionCrews(save, level || CAMPAIGN_LEVELS[0]);
+    $('hg-slots').innerHTML = level
+      ? `<b>${slots}</b> tank${slots === 1 ? '' : 's'} for <span>${esc(level.name)}</span>`
+      : '';
+    $('hg-army').innerHTML = save.army.map((c, i) => {
+      const rank = crewRank(c), going = squad.includes(c);
+      return `<button type="button" class="crew${i === this.armySel ? ' sel' : ''}${going ? ' going' : ''}" data-crew="${i}">
+        <span class="cr-top"><b>${esc(c.name)}</b>${c.player ? '<span class="cr-you">You</span>' : ''}</span>
+        <span class="cr-rank r${rank}">${RANKS[rank]}</span>
+        <span class="cr-bar"><i style="width:${(crewProgress(c) * 100).toFixed(0)}%"></i></span>
+        <span class="cr-kit">${PART_SHORT[c.equip.weapon]} · ${PART_SHORT[c.equip.hull]}</span>
+        <span class="cr-ups">${[['A', c.armor], ['G', c.gun]].map(([t, lv]) =>
+          `<span class="cr-up"><i>${t}</i>${Array.from({ length: UPGRADES.max }, (_, k) => `<u class="${k < lv ? 'on' : ''}"></u>`).join('')}</span>`).join('')}</span>
+        ${going ? '<span class="cr-go">Deploying</span>' : ''}
+      </button>`;
+    }).join('');
+    $('hg-army').querySelectorAll('.crew').forEach(b => b.addEventListener('click', () => {
+      this.app.sfx.play('click');
+      this.armySel = +b.dataset.crew;
+      this.hgSel = null;
+      this.renderHangar();
+    }));
+    const c = this.crew(), i = this.armySel;
+    const picked = (save.squad || []).includes(i);
+    $('hg-crew').innerHTML = `<div class="hg-crewhead">
+        <div><p class="eyebrow">${c.player ? 'Your tank' : 'Crew'}</p><h3>${esc(c.name)}</h3>
+          <small>${RANKS[crewRank(c)]} · ${Math.round(c.xp)} XP · ${c.missions || 0} mission${(c.missions || 0) === 1 ? '' : 's'}</small></div>
+        <div class="hg-crewbtns">
+          <button type="button" class="btn ghost small" id="hg-rename">Rename</button>
+          ${c.player ? '' : `<button type="button" class="btn ${picked ? '' : 'ghost '}small" id="hg-pick">${picked ? 'In the squad' : 'Add to squad'}</button>`}
+        </div>
+      </div>`;
+    $('hg-rename').addEventListener('click', () => this.renameCrew(i));
+    const pick = $('hg-pick');
+    if (pick) pick.addEventListener('click', () => {
+      this.app.sfx.play('click');
+      const sq = save.squad = (save.squad || []).filter(x => x !== i);
+      if (!picked) sq.push(i);
+      saveCampaign(save);
+      this.renderHangar();
+    });
+  }
+
+  renameCrew(i) {
+    const save = this.cp, c = save.army[i];
+    this.confirm({ title: 'Name this crew', text: 'Their name shows on the tank in battle and on the scoreboards.', ok: 'Save', input: c.name }, v => {
+      const name = cleanName(v);
+      if (!name) return;
+      c.name = name;
+      if (c.player) save.pilot = name;
+      saveCampaign(save);
+      this.renderHangar();
+    });
+  }
+
   // The bar under the catalog: what's being previewed and what it would cost.
   renderHangarAction() {
     const bar = $('hg-action'), sel = this.hgSel, save = this.cp;
     if (!sel) {
-      bar.innerHTML = '<p class="hg-hint">Pick a part to preview it on your tank. Nothing is bought until you confirm.</p>';
+      bar.innerHTML = `<p class="hg-hint">Fitting <b>${esc(this.crew().name)}</b> · pick a part to preview it. Nothing is bought until you confirm.</p>`;
       return;
     }
-    const part = PARTS[sel.slot][sel.id], owned = save.owned[sel.slot].includes(sel.id), short = part.price - save.money;
+    const part = PARTS[sel.slot][sel.id], owned = this.crew().owned[sel.slot].includes(sel.id), short = part.price - save.money;
     const main = owned
       ? '<button type="button" class="btn" id="hg-buy">Equip</button>'
       : short > 0
@@ -1124,31 +1193,31 @@ class UI {
   previewPart(slot, id) {
     this.app.sfx.play('click');
     // Picking what's already fitted (or the same part again) ends the preview.
-    this.hgSel = this.cp.equip[slot] === id || (this.hgSel && this.hgSel.slot === slot && this.hgSel.id === id) ? null : { slot, id };
+    this.hgSel = this.crew().equip[slot] === id || (this.hgSel && this.hgSel.slot === slot && this.hgSel.id === id) ? null : { slot, id };
     this.renderHangar();
   }
 
   buyUpgrade(key) {
-    const save = this.cp, cost = upgradeCost(save[key]);
+    const save = this.cp, c = this.crew(), cost = upgradeCost(c[key]);
     if (cost > save.money) { this.app.sfx.play('click'); this.flashMoney(); return; }
     save.money -= cost;
-    save[key]++;
+    c[key]++;
     saveCampaign(save);
     this.app.sfx.play('upgrade');
     this.renderHangar();
   }
 
   confirmPart() {
-    const save = this.cp, sel = this.hgSel;
+    const save = this.cp, c = this.crew(), sel = this.hgSel;
     if (!sel) return;
     const { slot, id } = sel, P = PARTS[slot][id];
-    if (!save.owned[slot].includes(id)) {
+    if (!c.owned[slot].includes(id)) {
       if (P.price > save.money) { this.app.sfx.play('click'); this.flashMoney(); return; }
       save.money -= P.price;
-      save.owned[slot].push(id);
+      c.owned[slot].push(id);
       this.app.sfx.play('coin');
     } else this.app.sfx.play('upgrade');
-    save.equip[slot] = id;
+    c.equip[slot] = id;
     this.hgSel = null;
     saveCampaign(save);
     this.renderHangar();
@@ -1196,7 +1265,7 @@ class UI {
         this.afterPilotChange();
       });
     } else if (act === 'reset') {
-      this.confirm({ title: `Restart ${p.pilot}'s campaign?`, text: 'All progress, stars, money and hangar upgrades for this pilot are wiped and the campaign starts again from the first mission. This can\'t be undone.', ok: 'Restart campaign', danger: true }, () => {
+      this.confirm({ title: `Restart ${p.pilot}'s campaign?`, text: 'All progress, stars, money and army upgrades for this pilot are wiped and the campaign starts again from the first mission. This can\'t be undone.', ok: 'Restart campaign', danger: true }, () => {
         const fresh = resetPilot(id);
         if (id === this.cp.id) this.switchPilot(fresh); else this.afterPilotChange();
       });
