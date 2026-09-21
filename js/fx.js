@@ -86,7 +86,7 @@ class FX {
       case 'salvo_launch': this.salvoLaunch(e); break;
       case 'flak_on': this.spawn(P_RING, e.tank.x, e.tank.y, 0, 0, 0.5, 16, { tint: 'gold' }); break;
       case 'intercept': this.intercept(e); break;
-      case 'air_call': this.markers.push({ s: e.strike, life: AIRSTRIKE.delay + 1.2 }); break;
+      case 'air_call': this.markers.push({ s: e.strike || { x: e.x, y: e.y }, life: AIRSTRIKE.delay + 1.2 }); break;
       case 'air_boom': this.blast(e.x, e.y, 1.3); break;
     }
   }

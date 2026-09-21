@@ -487,9 +487,12 @@ class Net {
     const tk = [];
     for (const t of g.tanks) {
       tk.push([t.netIdx, Math.round(t.x), Math.round(t.y), Math.round(t.angle * 100), Math.round(t.turret * 100),
-        Math.round(t.hp), (t.alive ? 1 : 0) | (t.input.fire ? 2 : 0) | (t.boostT > 0 ? 4 : 0) | (t.burnT > 0 ? 8 : 0) | (t.repairing ? 16 : 0) | (t.jug ? 32 : 0),
+        Math.round(t.hp),
+        (t.alive ? 1 : 0) | (t.input.fire ? 2 : 0) | (t.boostT > 0 ? 4 : 0) | (t.burnT > 0 ? 8 : 0) | (t.repairing ? 16 : 0) | (t.jug ? 32 : 0)
+          | (t.shield > 0 ? 64 : 0) | (t.invuln > 0 ? 128 : 0) | (t.flakT > 0 ? 256 : 0) | (t.repairT > 0 ? 512 : 0) | (t.overheatT > 0 ? 1024 : 0),
         Math.round(t.treadL), Math.round(t.treadR), Math.round(t.missileCharge),
-        Math.round(t.score || 0), t.level || 1, Math.round(t.stats.xp || 0), Math.round(t.maxHp)]);
+        Math.round(t.score || 0), t.level || 1, Math.round(t.stats.xp || 0), Math.round(t.maxHp),
+        Math.round(t.reload * 100), Math.round(t.heat || 0), t.grenadeAmmo | 0, Math.round((t.flakAngle || 0) * 100)]);
     }
     const id = o => o.nid || (o.nid = ++this.oid);
     const sh = g.shells.map(x => [id(x), Math.round(x.x), Math.round(x.y), SHELL_NET.indexOf(x.kind), Math.round(x.speed), 0, Math.round(x.angle * 100)]);
@@ -628,6 +631,7 @@ class Net {
       if (ev.type === 'upgrade' && ev.tank && ev.slot) { ev.tank.loadout[ev.slot] = ev.id; ev.tank.recalc(g.baseHp); }
       if (ev.type === 'hit' && ev.target) ev.target.flash = 1;
       if (ev.type === 'shot' && ev.tank) ev.tank.recoil = 1;
+      if (ev.type === 'respawn' && ev.tank) ev.tank.spawnFx = 1;
       g.events.push(ev);
     }
     let a = buf[0], b = buf[buf.length - 1];
@@ -636,6 +640,14 @@ class Net {
     const f = span > 1e-4 ? clamp((t0 - a.k) / span, 0, 1) : 1;
     g.time = t0;
     const mine = g.locals[0];
+    // Recoil, hit flash and the respawn shimmer are set by events and normally
+    // wound down by the physics step, which a joiner doesn't run.
+    for (const t of g.tanks) {
+      if (t === mine) continue;   // our own tank runs the real physics step
+      t.recoil = Math.max(0, t.recoil - dt * 4.5);
+      t.flash = Math.max(0, t.flash - dt * 6);
+      t.spawnFx = Math.max(0, t.spawnFx - dt * 1.5);
+    }
     const prev = new Map();
     for (const row of a.tk) prev.set(row[0], row);
     for (const row of b.tk) {
@@ -654,6 +666,16 @@ class Net {
       t.boostT = (flags & 4) ? 1 : 0;
       t.burnT = (flags & 8) ? 1 : 0;
       t.repairing = !!(flags & 16);
+      // Timed effects arrive as on/off: hold them up while the host says so.
+      t.shield = (flags & 64) ? 0.6 : 0;
+      t.invuln = (flags & 128) ? 0.6 : 0;
+      t.flakT = (flags & 256) ? 1 : 0;
+      t.repairT = (flags & 512) ? 1 : 0;
+      t.overheatT = (flags & 1024) ? 1 : 0;
+      t.reload = row[14] / 100;
+      t.heat = row[15];
+      t.grenadeAmmo = row[16];
+      t.flakAngle = row[17] / 100;
       t.treadL = lerp(p[7], row[7], f); t.treadR = lerp(p[8], row[8], f);
       t.missileCharge = row[9];
       t.score = row[10];
