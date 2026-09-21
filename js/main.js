@@ -322,6 +322,7 @@ const App = {
       const simDt = dt * (g.phase === 'over' && g.overT < 0.8 ? 0.35 : 1);
       const steps = Math.ceil(simDt / (1 / 60));
       for (let i = 0; i < steps; i++) g.update(simDt / steps);
+      if (this.net.isHost && playing) this.net.collectEvents(g);
       this.processEvents();
       r.fx.update(simDt, g);
       if (this.net.isHost && playing) this.net.hostFrame(dt, g);

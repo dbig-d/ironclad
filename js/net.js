@@ -134,6 +134,8 @@ class Net {
     this.inputT = 0;
     this.seq = 0;
     this.oid = 0;              // ids for shells, missiles and the rest
+    this.pendingEv = [];       // host: effects waiting for the next snapshot
+    this.evQueue = [];         // joiner: effects waiting for the clock to reach them
     this.lobby = { mode: 'tdm', size: 2, hits: 7, biome: 'random', difficulty: 'normal', fill: true };
   }
 
@@ -242,6 +244,8 @@ class Net {
     if (!quiet && this.channel) this.sig({ t: 'bye' });
     this.reset();
     this.playT = undefined;
+    this.pendingEv.length = 0;
+    this.evQueue.length = 0;
     this.lastSnap = 0;
     this.hostBusy = false;
     try { if (this.channel) this.channel.unsubscribe(); } catch (e) {}
@@ -495,7 +499,7 @@ class Net {
     const sm = g.smokes.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.r), Math.round(x.life * 100), x.seed]);
     const ar = g.artillery.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.h), Math.round(x.tx), Math.round(x.ty), Math.round(x.k * 100), Math.round(x.sx), Math.round(x.sy)]);
     const as = g.airstrikes.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.a * 100), Math.round(x.t * 100), x.along === undefined ? 0 : Math.round(x.along), x.owner ? x.owner.netIdx : -1]);
-    const snap = { t: 's', k: g.time, tk, sh, ms, gr, mi, sm, ar, as, ob: this.packObjective(g), ev: this.packEvents(g) };
+    const snap = { t: 's', k: g.time, tk, sh, ms, gr, mi, sm, ar, as, ob: this.packObjective(g), ev: this.pendingEv.splice(0) };
     // Kills, deaths and damage change slowly: send them a few times a second.
     this.statT = (this.statT || 0) - 1;
     if (this.statT <= 0) {
@@ -520,6 +524,14 @@ class Net {
   }
 
   // Events carry live objects; send ids instead and rebuild them on the far side.
+  // Called every frame, before the effects layer consumes and clears the list.
+  collectEvents(g) {
+    if (!this.isHost || this.state !== 'playing' || !g.events.length) return;
+    const out = this.pendingEv;
+    for (const e of this.packEvents(g)) out.push(e);
+    if (out.length > 500) out.splice(0, out.length - 500);
+  }
+
   packEvents(g) {
     const out = [];
     for (const e of g.events) {
@@ -581,10 +593,9 @@ class Net {
         else ev[k] = v;
       }
       if (ev.__drop) continue;
-      // Upgrades repaint the tank, so apply the part before the effects play.
-      if (ev.type === 'upgrade' && ev.tank && ev.slot) { ev.tank.loadout[ev.slot] = ev.id; ev.tank.recalc(g.baseHp); }
-      g.events.push(ev);
+      this.evQueue.push({ k: m.k, ev });
     }
+    if (this.evQueue.length > 400) this.evQueue.splice(0, this.evQueue.length - 400);
   }
 
   // Play the match back on the host's clock, a fraction of a second behind the
@@ -610,6 +621,15 @@ class Net {
       this.playT += dt * clamp(1 + off * 2.5, 0.75, 1.35);
     }
     const t0 = this.playT;
+    // Release the effects whose moment has arrived.
+    while (this.evQueue.length && this.evQueue[0].k <= t0) {
+      const ev = this.evQueue.shift().ev;
+      // A few things the effects layer reads off the tank itself.
+      if (ev.type === 'upgrade' && ev.tank && ev.slot) { ev.tank.loadout[ev.slot] = ev.id; ev.tank.recalc(g.baseHp); }
+      if (ev.type === 'hit' && ev.target) ev.target.flash = 1;
+      if (ev.type === 'shot' && ev.tank) ev.tank.recoil = 1;
+      g.events.push(ev);
+    }
     let a = buf[0], b = buf[buf.length - 1];
     for (let i = 0; i < buf.length - 1; i++) if (buf[i].k <= t0 && buf[i + 1].k >= t0) { a = buf[i]; b = buf[i + 1]; break; }
     const span = b.k - a.k;
