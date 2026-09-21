@@ -559,7 +559,7 @@ class WorldMap {
       } else {
         ctx.fillStyle = won ? '#fff' : '#3a2206';
         ctx.font = `700 ${Math.round(15 * K)}px "Barlow Condensed", "Arial Narrow", sans-serif`;
-        ctx.fillText(String(n.j + 1), n.x, n.y + 1);
+        ctx.fillText(String(L.order + 1), n.x, n.y + 1);
       }
       // Stars under the node, then the mission name and mode.
       for (let i = 0; i < 3; i++) this.star(ctx, n.x + (i - 1) * 11 * K, n.y + r + 9 * K, 4.6 * K, st[i] ? '#ffc850' : 'rgba(20,22,20,0.7)', st[i] ? '#8a5a10' : 'rgba(236,230,214,0.35)');

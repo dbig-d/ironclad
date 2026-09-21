@@ -1024,7 +1024,7 @@ class UI {
     const tech = `<span class="tier">${[0, 1, 2, 3, 4, 5].map(i => `<i class="${i < L.tier ? 'on' : ''}"></i>`).join('')}</span>`;
     const conds = ['Win the mission', ...L.stars.map(condText)];
     el.innerHTML = head +
-      `<h3 class="br-name">${L.boss ? '<span class="br-boss">Boss</span>' : `<span class="br-num">${n.j + 1}</span>`}${esc(L.name)}</h3>
+      `<h3 class="br-name">${L.boss ? '<span class="br-boss">Boss</span>' : `<span class="br-num">${L.order + 1}</span>`}${esc(L.name)}</h3>
       <div class="br-mode">${ICONS[L.mode]}<span>${m.name}</span><b>${size}</b></div>
       <p class="br-text">${esc(L.brief)}</p>
       ${twists.length ? `<ul class="br-twists">${twists.map(t => `<li><b>${t.name}</b>${esc(t.desc)}</li>`).join('')}</ul>` : ''}
