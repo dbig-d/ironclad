@@ -478,8 +478,9 @@ const CREW_NAMES = ['Bulldog', 'Anvil', 'Sable', 'Rivet', 'Cobra', 'Hammer', 'On
 function newCrew(name, player) {
   const owned = {};
   for (const slot of SLOTS) owned[slot] = [DEFAULT_LOADOUT[slot]];
-  // Crews start trained: experience makes them better than average, not usable.
-  return { name, player: !!player, xp: RANK_XP[1], armor: 0, gun: 0, owned, equip: Object.assign({}, DEFAULT_LOADOUT), missions: 0 };
+  // Hired crews start trained: experience makes them better than average, not
+  // usable. Your own tank has no rank at all — you are already as good as you are.
+  return { name, player: !!player, xp: player ? 0 : RANK_XP[1], armor: 0, gun: 0, owned, equip: Object.assign({}, DEFAULT_LOADOUT), missions: 0 };
 }
 
 function crewRank(c) {
@@ -501,23 +502,48 @@ function crewProgress(c) {
 function newCampaignSave(pilot) {
   const army = [newCrew(pilot || 'You', true)];
   for (let i = 1; i < ARMY_SIZE; i++) army.push(newCrew(CREW_NAMES[(i - 1) % CREW_NAMES.length]));
-  return { v: 3, id: null, pilot: pilot || 'Pilot', money: 0, stars: {}, army, squad: [1, 2, 3], seen: 0, updated: 0 };
+  return { v: 3, id: null, pilot: pilot || 'Pilot', money: 0, stars: {}, army, squad: [], tut: {}, seen: 0, updated: 0 };
 }
+
+// A short guided tour of the campaign screens, shown once per pilot and
+// repeatable from the question mark on the map.
+const TUTORIALS = {
+  map: [
+    { title: 'The Iron Road', spot: '#cp-brief', text: 'Forty-two missions across seven fronts. Pick one on the map to read its briefing: the mode, the odds, and the three stars on offer.' },
+    { title: 'Money and stars', spot: '.cp-wallet', text: 'A mission pays in full the first time you win it, and again for every new star you take. Replaying an old one pays a third — a cheap way to train a crew.' },
+    { title: 'Your army', spot: '#cp-hangar', text: 'Ten tanks answer to you, your own among them. Open the Army to fit each crew with parts, armour plating and a heavier gun.' },
+    { title: 'Commit your tanks', text: 'Bigger missions field more of your army. You choose who rides out before you deploy, and only the crews you send earn experience.' },
+  ],
+  army: [
+    { title: 'Ten crews', text: 'Every tank here is yours to build. Open one to reach its bay — parts, armour and gun calibre are bought per crew, out of the same wallet.' },
+    { title: 'They learn', text: 'A crew earns experience for every mission it wins, half on a repeat, and promotes from Recruit to Elite. Higher ranks aim better, flank harder and panic less.' },
+    { title: 'Your own tank', text: 'Yours carries no rank. You are already driving it as well as you can — it only gets better when you spend money on it.' },
+  ],
+  squad: [
+    { title: 'Pick your squad', text: 'Your tank takes the first slot. Fill the rest from the roster: send veterans into a hard front, or bring a recruit along somewhere safe to blood them.' },
+  ],
+};
 
 // How many tanks a mission lets you field, the player included.
 function missionSlots(level) {
   return MODES[level.mode].teams ? Math.max(1, level.sizes[0]) : 1;
 }
 
-// The crews that drive out: your own tank first, then the ones you picked, then
-// whoever is left if you picked fewer than the mission allows.
+// The crews that drive out: your own tank, then the ones you picked, in the
+// order you picked them. Nobody is drafted for you — the mission will not
+// deploy until every slot is filled.
 function missionCrews(save, level) {
   const slots = missionSlots(level), out = [save.army[0]];
-  const picked = (save.squad || []).filter(i => i > 0 && save.army[i]);
-  for (const i of picked) { if (out.length >= slots) break; out.push(save.army[i]); }
-  for (let i = 1; i < save.army.length && out.length < slots; i++) if (!out.includes(save.army[i])) out.push(save.army[i]);
+  for (const i of save.squad || []) {
+    if (out.length >= slots) break;
+    const c = save.army[i];
+    if (i > 0 && c && !out.includes(c)) out.push(c);
+  }
   return out;
 }
+
+// Whether the roster is ready to roll for this mission.
+function squadReady(save, level) { return missionCrews(save, level).length >= missionSlots(level); }
 
 // Fill in anything missing (older saves, parts that no longer exist).
 function normalizeSave(s, base) {
@@ -548,7 +574,9 @@ function normalizeSave(s, base) {
       if (!c.owned[slot].includes(c.equip[slot])) c.equip[slot] = DEFAULT_LOADOUT[slot];
     }
   });
-  out.squad = (out.squad || []).filter(i => i > 0 && i < ARMY_SIZE).slice(0, ARMY_SIZE - 1);
+  out.squad = (out.squad || []).filter((i, k, a) => i > 0 && i < ARMY_SIZE && a.indexOf(i) === k).slice(0, ARMY_SIZE - 1);
+  out.tut = Object.assign({}, out.tut);
+  out.army[0].xp = 0;
   // The tank, its parts and its upgrades all live on the crews now.
   delete out.equip; delete out.owned; delete out.armor; delete out.gun;
   out.v = 3;
@@ -782,13 +810,16 @@ function applyMissionResult(save, level, ev) {
   const promotions = [];
   if (ev.won) {
     const xp = Math.round(XP_MISSION(level) * (repeat ? 0.5 : 1));
+    let trained = 0;
     for (const c of missionCrews(save, level)) {
+      c.missions = (c.missions || 0) + 1;
+      if (c.player) continue;
       const before = crewRank(c);
       c.xp += xp;
-      c.missions = (c.missions || 0) + 1;
+      trained++;
       if (crewRank(c) > before) promotions.push({ name: c.name, rank: crewRankName(c) });
     }
-    if (xp) lines.push([`Crew experience${repeat ? ' (replay)' : ''}`, 0, xp + ' XP each']);
+    if (xp && trained) lines.push([`Crew experience${repeat ? ' (replay)' : ''}`, 0, xp + ' XP each']);
   }
   saveCampaign(save);
   return { lines, total, newStars: starCount(now) - starCount(prev), stars: now, promotions };

@@ -248,13 +248,13 @@ const App = {
         if (inp.wasPressed('Escape')) { if (!$('confirm').hidden) this.ui.closeConfirm(false); else $('pilots').hidden = true; }
       } else if (this.state === 'campaign') {
         const w = this.ui.world;
-        if (inp.wasPressed('Escape')) this.toMenu();
+        if (inp.wasPressed('Escape')) { if ($('squad').hidden) this.toMenu(); else this.ui.closeSquad(false); }
         else if (!typing && (inp.wasPressed('ArrowRight') || inp.wasPressed('KeyD'))) w.step(1);
         else if (!typing && (inp.wasPressed('ArrowLeft') || inp.wasPressed('KeyA'))) w.step(-1);
-        else if (inp.wasPressed('Enter') && !typing && this.ui.briefLevel) return this.startMission(this.ui.briefLevel);
+        else if (inp.wasPressed('Enter') && !typing && this.ui.briefLevel && $('squad').hidden) return this.ui.deploy(this.ui.briefLevel);
       } else if (inp.wasPressed('Escape')) this.openCampaign();
       if (this.state === 'campaign') this.ui.world.frame(dt);
-      else if (this.state === 'hangar') this.ui.preview.frame(dt);
+      else if (this.state === 'hangar' && this.ui.hgView === 'bay') this.ui.preview.frame(dt);
       this.sfx.frame([]);
       return;
     }

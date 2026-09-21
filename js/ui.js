@@ -252,6 +252,11 @@ class UI {
       $(id).addEventListener('input', () => { this.settings[key] = cleanName($(id).value, ''); this.save(); });
     }
     $('cp-hangar').addEventListener('click', () => { this.app.sfx.play('click'); this.app.openHangar(); });
+    $('cp-help').addEventListener('click', () => { this.app.sfx.play('click'); this.tutorial('map', true); });
+    $('sq-cancel').addEventListener('click', () => this.closeSquad(false));
+    $('sq-ok').addEventListener('click', () => this.closeSquad(true));
+    $('tut-skip').addEventListener('click', () => this.tutStep(999));
+    $('tut-next').addEventListener('click', () => this.tutStep(1));
     $('hg-back').addEventListener('click', () => { this.app.sfx.play('click'); this.app.openCampaign(); });
     $('br-watch').addEventListener('click', () => { $('br-out').hidden = true; this.brDismissed = true; });
     $('br-again').addEventListener('click', () => this.app.startMatch());
@@ -1003,6 +1008,7 @@ class UI {
     if (!this.world) this.world = new WorldMap($('world'), this);
     this.renderWallet();
     this.world.open(this.cp);
+    this.tutorial('map');
   }
 
   renderWallet() {
@@ -1014,6 +1020,7 @@ class UI {
 
   renderBrief(n) {
     const el = $('cp-brief'), save = this.cp, reg = CAMPAIGN.regions[n.region];
+    this.briefNode = n;
     const head = `<p class="br-region">Region ${ROMAN[n.region]} · ${esc(reg.name)}</p>`;
     if (n.ghost) {
       this.briefLevel = null;
@@ -1028,29 +1035,118 @@ class UI {
     const conds = ['Win the mission', ...L.stars.map(condText)];
     el.innerHTML = head +
       `<h3 class="br-name">${L.boss ? '<span class="br-boss">Boss</span>' : `<span class="br-num">${L.order + 1}</span>`}${esc(L.name)}</h3>
-      <p class="br-squad"><span>Commits <b>${missionSlots(L)}</b> tank${missionSlots(L) === 1 ? '' : 's'}</span><span>${missionCrews(this.cp, L).map(c => esc(c.name)).join(' · ')}</span></p>
+      ${this.briefSquad(L)}
       <div class="br-mode">${ICONS[L.mode]}<span>${m.name}</span><b>${size}</b></div>
       <p class="br-text">${esc(L.brief)}</p>
       ${twists.length ? `<ul class="br-twists">${twists.map(t => `<li><b>${t.name}</b>${esc(t.desc)}</li>`).join('')}</ul>` : ''}
       <div class="br-intel"><span>Enemy crews <span class="chev">${'<i></i>'.repeat(skill)}</span> ${SKILLS[skill - 1].name}</span><span>Enemy tech ${tech}</span></div>
       <ul class="br-stars">${conds.map((c, i) => `<li class="${st[i] ? 'got' : ''}">${STAR_SVG}<span>${esc(c)}</span></li>`).join('')}</ul>
       <div class="br-reward"><span>Reward</span><b>${fmtMoney(st[0] ? L.reward * 0.35 : L.reward)}</b><small>${st[0] ? 'replay · ' : ''}+${fmtMoney(L.reward * 0.5)} per new star</small></div>
-      ${open ? '<button type="button" class="deploy" id="cp-deploy">Deploy <kbd>Enter</kbd></button>' : '<p class="br-locked">Win the previous mission to unlock this one.</p>'}`;
+      ${open ? this.deployBtn(L) : '<p class="br-locked">Win the previous mission to unlock this one.</p>'}`;
     this.briefLevel = open ? L : null;
-    if (open) $('cp-deploy').addEventListener('click', () => this.app.startMission(L));
+    if (!open) return;
+    const pick = $('cp-pick');
+    if (pick) pick.addEventListener('click', () => this.openSquad(L));
+    $('cp-deploy').addEventListener('click', () => this.deploy(L));
+  }
+
+  // The tanks this mission takes, and who is in them. Nobody is assigned for
+  // you: empty slots have to be filled before the mission will run.
+  briefSquad(L) {
+    const slots = missionSlots(L), crews = missionCrews(this.cp, L);
+    if (slots <= 1) return '<p class="br-squad"><span>You go in alone</span></p>';
+    const rows = [];
+    for (let i = 0; i < slots; i++) {
+      const c = crews[i];
+      rows.push(c
+        ? `<li class="br-slot"><b>${esc(c.name)}</b><small class="cr-rank${c.player ? '' : ' r' + crewRank(c)}">${c.player ? 'You' : RANKS[crewRank(c)]}</small></li>`
+        : '<li class="br-slot empty"><b>Empty slot</b><small>Choose a crew</small></li>');
+    }
+    return `<p class="br-squad"><span>Commits <b>${slots}</b> tanks</span></p>
+      <ul class="br-slots">${rows.join('')}</ul>
+      <button type="button" class="btn ghost small br-pick" id="cp-pick">Choose crews</button>`;
+  }
+
+  deployBtn(L) {
+    const short = missionSlots(L) - missionCrews(this.cp, L).length;
+    return short > 0
+      ? `<button type="button" class="deploy" id="cp-deploy">Choose ${short} more</button>`
+      : '<button type="button" class="deploy" id="cp-deploy">Deploy <kbd>Enter</kbd></button>';
+  }
+
+  // Deploy only once the roster is full; otherwise open the picker instead.
+  deploy(L) {
+    if (!squadReady(this.cp, L)) { this.app.sfx.play('click'); this.openSquad(L); return; }
+    this.app.startMission(L);
+  }
+
+  // Pick who rides out. Your own tank always takes the first slot.
+  openSquad(L) {
+    this.sqLevel = L;
+    this.sqPick = (this.cp.squad || []).filter(i => i > 0 && this.cp.army[i]).slice(0, missionSlots(L) - 1);
+    $('squad').hidden = false;
+    this.renderSquad();
+    this.tutorial('squad');
+  }
+
+  renderSquad() {
+    const save = this.cp, L = this.sqLevel, slots = missionSlots(L), pick = this.sqPick;
+    const left = slots - 1 - pick.length;
+    $('sq-sub').innerHTML = `${esc(L.name)} fields <b>${slots}</b> tanks. ${left > 0 ? `Choose ${left} more crew${left === 1 ? '' : 's'}.` : 'Your squad is ready.'}`;
+    const row = (c, i, n, fixed) => {
+      const st = this.buildStats(c.equip, c);
+      return `<button type="button" class="sq-row${fixed ? ' fixed' : n ? ' on' : ''}" data-crew="${i}"${fixed ? ' disabled' : ''}>
+        <span class="sq-num">${n || ''}</span>
+        <span class="sq-main"><b>${esc(c.name)}</b><small><i class="cr-rank${c.player ? '' : ' r' + crewRank(c)}">${c.player ? 'Commander' : RANKS[crewRank(c)]}</i> · ${PART_SHORT[c.equip.weapon]} · ${PART_SHORT[c.equip.hull]}</small></span>
+        <span class="sq-hp">${Math.round(st.hp)} hp</span>
+      </button>`;
+    };
+    $('sq-list').innerHTML = row(save.army[0], 0, 1, true) +
+      save.army.map((c, i) => i === 0 ? '' : row(c, i, pick.indexOf(i) >= 0 ? pick.indexOf(i) + 2 : 0, false)).join('');
+    $('sq-list').querySelectorAll('.sq-row[data-crew]:not(.fixed)').forEach(el => el.addEventListener('click', () => {
+      const i = +el.dataset.crew, at = pick.indexOf(i);
+      this.app.sfx.play('click');
+      if (at >= 0) pick.splice(at, 1);
+      else if (pick.length < slots - 1) pick.push(i);
+      else { pick.shift(); pick.push(i); }
+      this.renderSquad();
+    }));
+    $('sq-ok').disabled = pick.length < slots - 1;
+  }
+
+  closeSquad(ok) {
+    this.app.sfx.play('click');
+    $('squad').hidden = true;
+    if (!ok) return;
+    this.cp.squad = this.sqPick.slice();
+    saveCampaign(this.cp);
+    if (this.briefNode) this.renderBrief(this.briefNode);
+    if (!$('hangar').hidden) this.renderHangar();
   }
 
   // ---- army ------------------------------------------------------------------------------------
   // The crew whose tank is on the turntable.
   crew() { return this.cp.army[clamp(this.armySel | 0, 0, this.cp.army.length - 1)]; }
 
-  showHangar() {
+  showHangar(sel) {
     $('campaign').hidden = true;
     $('hangar').hidden = false;
     this.hgSel = null;
     if (this.armySel === undefined) this.armySel = 0;
+    if (sel !== undefined) this.armySel = sel;
+    this.hgView = sel === undefined ? 'roster' : 'bay';
     if (!this.preview) this.preview = new HangarPreview($('hg-preview'));
-    this.preview.resize();
+    if (!this.thumb) this.thumb = new CrewThumb();
+    this.renderHangar();
+    this.tutorial('army');
+  }
+
+  // Roster or bay: the workshop only appears once you pick a tank to work on.
+  setHangarView(v, sel) {
+    this.app.sfx.play('click');
+    if (sel !== undefined) this.armySel = sel;
+    this.hgView = v;
+    this.hgSel = null;
     this.renderHangar();
   }
 
@@ -1069,8 +1165,13 @@ class UI {
   renderHangar() {
     const save = this.cp, c = this.crew(), E = c.equip, sel = this.hgSel;
     const P = sel ? Object.assign({}, E, { [sel.slot]: sel.id }) : E;
+    const bay = this.hgView === 'bay';
+    $('hg-roster').hidden = bay;
+    $('hg-bay').hidden = !bay;
     this.renderWallet();
     this.renderArmyList();
+    if (!bay) return;
+    this.preview.resize();
     this.preview.setLoadout(P);
     $('hg-previewing').hidden = !sel;
     if (sel) $('hg-previewing').innerHTML = `Previewing <b>${PARTS[sel.slot][sel.id].name}</b>`;
@@ -1110,52 +1211,117 @@ class UI {
     this.renderHangarAction();
   }
 
-  // The roster strip: pick whose tank you're working on, name your crews, and
-  // choose who drives out next.
+  // The roster: every crew as a card, with the tank you built them showing.
   renderArmyList() {
     const save = this.cp, level = this.briefLevel || CAMPAIGN_LEVELS[frontierLevel(save)];
     const slots = level ? missionSlots(level) : 1;
-    const squad = missionCrews(save, level || CAMPAIGN_LEVELS[0]);
+    const squad = level ? missionCrews(save, level) : [save.army[0]];
+    const short = slots - squad.length;
     $('hg-slots').innerHTML = level
-      ? `<b>${slots}</b> tank${slots === 1 ? '' : 's'} for <span>${esc(level.name)}</span>`
+      ? `<b>${slots}</b> tank${slots === 1 ? '' : 's'} for <span>${esc(level.name)}</span>` +
+        (short > 0 ? ` · <span>${short} slot${short === 1 ? '' : 's'} open</span>` : '')
       : '';
     $('hg-army').innerHTML = save.army.map((c, i) => {
-      const rank = crewRank(c), going = squad.includes(c);
-      return `<button type="button" class="crew${i === this.armySel ? ' sel' : ''}${going ? ' going' : ''}" data-crew="${i}">
-        <span class="cr-top"><b>${esc(c.name)}</b>${c.player ? '<span class="cr-you">You</span>' : ''}</span>
-        <span class="cr-rank r${rank}">${RANKS[rank]}</span>
-        <span class="cr-bar"><i style="width:${(crewProgress(c) * 100).toFixed(0)}%"></i></span>
-        <span class="cr-kit">${PART_SHORT[c.equip.weapon]} · ${PART_SHORT[c.equip.hull]}</span>
-        <span class="cr-ups">${[['A', c.armor], ['G', c.gun]].map(([t, lv]) =>
-          `<span class="cr-up"><i>${t}</i>${Array.from({ length: UPGRADES.max }, (_, k) => `<u class="${k < lv ? 'on' : ''}"></u>`).join('')}</span>`).join('')}</span>
-        ${going ? '<span class="cr-go">Deploying</span>' : ''}
+      const rank = crewRank(c), going = squad.includes(c), st = this.buildStats(c.equip, c);
+      return `<button type="button" class="crew${going ? ' going' : ''}" data-crew="${i}">
+        <canvas class="cr-art" data-art="${i}"></canvas>
+        <span class="cr-body">
+          <span class="cr-top"><b>${esc(c.name)}</b>${c.player ? '<span class="cr-you">You</span>' : ''}</span>
+          <span class="cr-rankrow">${c.player
+            ? '<span class="cr-rank">Commander</span>'
+            : `<span class="cr-rank r${rank}">${RANKS[rank]}</span><span class="cr-bar"><i style="width:${(crewProgress(c) * 100).toFixed(0)}%"></i></span>`}</span>
+          <span class="cr-stats">
+            <span><span>Armor</span><b>${Math.round(st.hp)}</b></span>
+            <span><span>Damage</span><b>${Math.round(st.shot)}</b></span>
+            <span><span>Speed</span><b>${Math.round(st.road)}</b></span>
+          </span>
+          <span class="cr-kit">${PART_SHORT[c.equip.weapon]} · ${PART_SHORT[c.equip.hull]} · ${PARTS.special[c.equip.special].name}</span>
+          <span class="cr-foot">
+            <span class="cr-ups">${[['A', c.armor], ['G', c.gun]].map(([t, lv]) =>
+              `<span class="cr-up"><i>${t}</i>${Array.from({ length: UPGRADES.max }, (_, k) => `<u class="${k < lv ? 'on' : ''}"></u>`).join('')}</span>`).join('')}</span>
+            ${going ? '<span class="cr-go">Deploying</span>' : ''}
+          </span>
+        </span>
       </button>`;
     }).join('');
-    $('hg-army').querySelectorAll('.crew').forEach(b => b.addEventListener('click', () => {
-      this.app.sfx.play('click');
-      this.armySel = +b.dataset.crew;
-      this.hgSel = null;
-      this.renderHangar();
-    }));
-    const c = this.crew(), i = this.armySel;
-    const picked = (save.squad || []).includes(i);
+    $('hg-army').querySelectorAll('.crew').forEach(el => el.addEventListener('click', () => this.setHangarView('bay', +el.dataset.crew)));
+    $('hg-army').querySelectorAll('.cr-art').forEach(el => this.thumb.draw(el, save.army[+el.dataset.art].equip));
+    if (this.hgView !== 'bay') return;
+    this.renderCrewHead();
+  }
+
+  // The header over the turntable: who you are fitting out, and the way back.
+  renderCrewHead() {
+    const save = this.cp, c = this.crew(), i = this.armySel;
+    const level = this.briefLevel || CAMPAIGN_LEVELS[frontierLevel(save)];
+    const picked = level ? missionCrews(save, level).includes(c) : (save.squad || []).includes(i);
     $('hg-crew').innerHTML = `<div class="hg-crewhead">
+        <div class="hg-flip">
+          <button type="button" class="btn ghost small" id="hg-roster-back" title="Back to the roster">Roster</button>
+          <button type="button" class="btn ghost small" id="hg-prev" aria-label="Previous crew"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
+          <button type="button" class="btn ghost small" id="hg-next" aria-label="Next crew"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+        </div>
         <div><p class="eyebrow">${c.player ? 'Your tank' : 'Crew'}</p><h3>${esc(c.name)}</h3>
-          <small>${RANKS[crewRank(c)]} · ${Math.round(c.xp)} XP · ${c.missions || 0} mission${(c.missions || 0) === 1 ? '' : 's'}</small></div>
+          <small>${c.player ? 'Commander' : `${RANKS[crewRank(c)]} · ${Math.round(c.xp)} XP`} · ${c.missions || 0} mission${(c.missions || 0) === 1 ? '' : 's'}</small></div>
         <div class="hg-crewbtns">
           <button type="button" class="btn ghost small" id="hg-rename">Rename</button>
-          ${c.player ? '' : `<button type="button" class="btn ${picked ? '' : 'ghost '}small" id="hg-pick">${picked ? 'In the squad' : 'Add to squad'}</button>`}
+          ${c.player ? '' : `<button type="button" class="btn ${picked ? '' : 'ghost '}small" id="hg-pick">${picked ? 'Committed' : 'Commit to mission'}</button>`}
         </div>
       </div>`;
+    const step = d => this.setHangarView('bay', (i + d + save.army.length) % save.army.length);
+    $('hg-roster-back').addEventListener('click', () => this.setHangarView('roster'));
+    $('hg-prev').addEventListener('click', () => step(-1));
+    $('hg-next').addEventListener('click', () => step(1));
     $('hg-rename').addEventListener('click', () => this.renameCrew(i));
     const pick = $('hg-pick');
     if (pick) pick.addEventListener('click', () => {
       this.app.sfx.play('click');
+      const level = this.briefLevel || CAMPAIGN_LEVELS[frontierLevel(save)];
+      const room = level ? missionSlots(level) - 1 : save.army.length;
       const sq = save.squad = (save.squad || []).filter(x => x !== i);
-      if (!picked) sq.push(i);
+      if (!picked) {
+        while (sq.length >= room && sq.length) sq.shift();
+        sq.push(i);
+      }
       saveCampaign(save);
       this.renderHangar();
     });
+  }
+
+  // A few cards on first sight of each campaign screen, and on demand from the
+  // question mark. Nothing here blocks play for long.
+  tutorial(id, force) {
+    const save = this.cp;
+    if (!save || (!force && (save.tut || {})[id])) return;
+    const steps = TUTORIALS[id];
+    if (!steps) return;
+    save.tut = Object.assign({}, save.tut, { [id]: 1 });
+    saveCampaign(save);
+    this.tutId = id;
+    this.tutI = 0;
+    this.tutSteps = steps;
+    this.showTutStep();
+  }
+
+  showTutStep() {
+    const step = this.tutSteps[this.tutI];
+    if (this.tutSpot) { this.tutSpot.classList.remove('tut-spot'); this.tutSpot = null; }
+    if (!step) { $('tut').hidden = true; return; }
+    $('tut-step').textContent = `Step ${this.tutI + 1} of ${this.tutSteps.length}`;
+    $('tut-title').textContent = step.title;
+    $('tut-text').textContent = step.text;
+    $('tut-next').textContent = this.tutI === this.tutSteps.length - 1 ? 'Got it' : 'Next';
+    $('tut-skip').hidden = this.tutI === this.tutSteps.length - 1;
+    const el = step.spot && document.querySelector(step.spot);
+    if (el && !el.hidden) { el.classList.add('tut-spot'); this.tutSpot = el; }
+    $('tut').hidden = false;
+  }
+
+  tutStep(d) {
+    if (!this.tutSteps) { $('tut').hidden = true; return; }
+    this.app.sfx.play('click');
+    this.tutI += d;
+    this.showTutStep();
   }
 
   renameCrew(i) {

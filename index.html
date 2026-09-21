@@ -153,6 +153,7 @@
     <div class="cp-head"><p class="eyebrow">Campaign</p><h2 class="cp-title">The Iron Road</h2></div>
     <button type="button" class="btn ghost cp-pilot" id="cp-pilot">Pilot</button>
     <div class="cp-wallet"><span class="cp-stars" id="cp-stars"></span><span class="cp-money" id="cp-money"></span></div>
+    <button type="button" class="btn ghost small" id="cp-help" aria-label="How the campaign works" title="How the campaign works">?</button>
     <button type="button" class="btn" id="cp-hangar">Army</button>
     <button type="button" class="btn ghost fs-inline" data-fs aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
   </header>
@@ -169,12 +170,14 @@
     <button type="button" class="btn ghost fs-inline" data-fs aria-label="Fullscreen" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
   </header>
   <div class="hg-body">
-    <section class="hg-army">
+    <section class="hg-roster" id="hg-roster">
       <div class="hg-armytop"><h3 class="label">Roster</h3><p class="hg-slots" id="hg-slots"></p></div>
-      <div class="hg-crews" id="hg-army"></div>
+      <div class="hg-grid" id="hg-army"></div>
     </section>
+    <div class="hg-bay" id="hg-bay" hidden>
+    <div class="hg-crewcard" id="hg-crew"></div>
+    <div class="hg-baycols">
     <section class="hg-left">
-      <div class="hg-crewcard" id="hg-crew"></div>
       <div class="hg-stage"><canvas id="hg-preview"></canvas><p class="hg-previewing" id="hg-previewing" hidden></p></div>
       <div class="hg-stats" id="hg-stats"></div>
     </section>
@@ -186,6 +189,28 @@
       <div class="hg-parts" id="hg-parts"></div>
       <div class="hg-action" id="hg-action"></div>
     </section>
+    </div>
+    </div>
+  </div>
+</div>
+
+<!-- Pick who rides out -->
+<div id="squad" class="overlay" hidden>
+  <div class="card wide squad-card" role="dialog" aria-labelledby="sq-title">
+    <h2 class="card-title" id="sq-title">Commit your tanks</h2>
+    <p class="hint" id="sq-sub"></p>
+    <div class="sq-list" id="sq-list"></div>
+    <div class="btns"><button type="button" class="btn ghost" id="sq-cancel">Cancel</button><button type="button" class="btn" id="sq-ok">Confirm</button></div>
+  </div>
+</div>
+
+<!-- Campaign tutorial -->
+<div id="tut" class="overlay tut" hidden>
+  <div class="card tut-card" role="dialog" aria-labelledby="tut-title">
+    <p class="eyebrow" id="tut-step"></p>
+    <h2 class="card-title" id="tut-title"></h2>
+    <p class="hint" id="tut-text"></p>
+    <div class="btns"><button type="button" class="btn ghost" id="tut-skip">Skip</button><button type="button" class="btn" id="tut-next">Next</button></div>
   </div>
 </div>
 

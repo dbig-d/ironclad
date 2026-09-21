@@ -640,6 +640,47 @@ class WorldMap {
 }
 
 // Hangar turntable: the player's current build on a concrete pad.
+// A still portrait of a crew's tank for the roster cards. One tank and one
+// borrowed renderer draw all ten, so a redraw costs nothing.
+class CrewThumb {
+  constructor() {
+    this.tank = new Tank({ name: '', team: 0, color: TEAM_COLORS[0] });
+    this.tank.alive = true;
+    this.tank.missileCharge = 9999;
+    this.r = Object.create(Renderer.prototype);
+    this.r.time = 0;
+    this.r.views = [{}];
+    this.r.game = { specialCost: () => 1, night: false };
+  }
+
+  draw(canvas, loadout) {
+    const rect = canvas.getBoundingClientRect();
+    const w = rect.width || 160, h = rect.height || 96;
+    if (!w || !h) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    const t = this.tank;
+    t.loadout = Object.assign({}, loadout);
+    t.recalc(140);
+    t.angle = -0.42;
+    t.turret = t.angle - 0.3;
+    t.treadL = t.treadR = 0;
+    t.spin = 0;
+    t.heat = 0;
+    const k = Math.min(w / 92, h / 76);
+    t.x = w / 2 / k; t.y = h / 2 / k;
+    ctx.save();
+    ctx.scale(k, k);
+    this.r.drawTankShadow(ctx, t);
+    this.r.drawTank(ctx, t);
+    ctx.restore();
+  }
+}
+
 class HangarPreview {
   constructor(canvas) {
     this.canvas = canvas;
