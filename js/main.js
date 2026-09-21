@@ -176,6 +176,7 @@ const App = {
 
   // The title screen: the way into skirmish, campaign or online.
   toTitle() {
+    if (this.net.active) this.net.leave();
     this.mission = null;
     this.paused = false;
     this.ui.showTitle();
@@ -184,6 +185,7 @@ const App = {
   },
 
   toMenu() {
+    if (this.net.active) return this.leaveOnline();
     this.mission = null;
     this.paused = false;
     // The campaign has its own way in from the title screen.

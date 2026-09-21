@@ -236,9 +236,9 @@ class UI {
     };
     document.addEventListener('fullscreenchange', fsChange);
     document.addEventListener('webkitfullscreenchange', fsChange);
-    $('p-menu').addEventListener('click', () => (this.app.mission ? this.app.openCampaign() : this.app.toMenu()));
+    $('p-menu').addEventListener('click', () => (this.app.net.active ? this.app.leaveOnline() : this.app.mission ? this.app.openCampaign() : this.app.toMenu()));
     $('e-again').addEventListener('click', () => this.app.startMatch());
-    $('e-menu').addEventListener('click', () => (this.app.mission ? this.app.openCampaign() : this.app.toMenu()));
+    $('e-menu').addEventListener('click', () => (this.app.net.active ? this.app.leaveOnline() : this.app.mission ? this.app.openCampaign() : this.app.toMenu()));
     $('cp-back').addEventListener('click', () => { this.app.sfx.play('click'); this.app.toTitle(); });
     $('cp-pilot').addEventListener('click', () => { this.app.sfx.play('click'); this.showPilots(); });
     $('cpc-pilots').addEventListener('click', () => { this.app.sfx.play('click'); this.showPilots(); });
@@ -433,7 +433,7 @@ class UI {
     this.game = game;
     $('campaign').hidden = true;
     $('hangar').hidden = true;
-    $('p-menu').textContent = game.campaign ? 'Leave mission' : 'Main menu';
+    $('p-menu').textContent = this.app.net.active ? 'Leave game' : game.campaign ? 'Leave mission' : 'Main menu';
     $('p-restart').textContent = game.campaign ? 'Restart mission' : 'Restart match';
     $('title').hidden = true;
     $('online').hidden = true;
@@ -951,8 +951,8 @@ class UI {
     tabs.hidden = !game.def.teams;
     this.renderLadder(game.def.teams ? 'lobby' : 'place');
     this.renderMissionResult(camp);
-    $('e-again').textContent = camp ? 'Retry' : 'Play again';
-    $('e-menu').textContent = camp ? 'Continue' : 'Main menu';
+    $('e-again').textContent = camp ? 'Retry' : this.app.net.active ? 'Back to the room' : 'Play again';
+    $('e-menu').textContent = camp ? 'Continue' : this.app.net.active ? 'Leave game' : 'Main menu';
     $('e-menu').className = camp ? 'btn' : 'btn ghost';
     $('e-again').className = camp ? 'btn ghost' : 'btn';
     $('end').hidden = false;

@@ -18,11 +18,11 @@ const NET = {
   ice: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }],
   home: 'dbig-d.github.io/ironclad',   // where online play actually works
   maxPlayers: 4,
-  snapHz: 15,          // world updates per second over a direct connection
-  relaySnapHz: 9,      // slower when bouncing through Supabase
+  snapHz: 22,          // world updates per second over a direct connection
+  relaySnapHz: 10,     // slower when bouncing through Supabase
   inputHz: 30,
   p2pTimeout: 9000,    // give up on a direct connection after this and relay
-  interp: 0.12,        // render this far behind the host, in seconds
+  interp: 0.1,         // render this far behind the host, in seconds
   codeChars: 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789',
   modes: ['tdm', 'koth', 'ctf', 'oneshot', 'escort', 'hardcore', 'br', 'jug'],
 };
@@ -133,6 +133,7 @@ class Net {
     this.sendT = 0;
     this.inputT = 0;
     this.seq = 0;
+    this.oid = 0;              // ids for shells, missiles and the rest
     this.lobby = { mode: 'tdm', size: 2, hits: 7, biome: 'random', difficulty: 'normal', fill: true };
   }
 
@@ -155,7 +156,8 @@ class Net {
 
   async openRoom(code) {
     this.code = code;
-    this.sb = window.supabase.createClient(NET.url, NET.anon, { realtime: { params: { eventsPerSecond: 40 } } });
+    // One client per page: opening a second room reuses it.
+    this.sb = this.sb || window.supabase.createClient(NET.url, NET.anon, { realtime: { params: { eventsPerSecond: 40 } } });
     this.channel = this.sb.channel('ic-' + code, { config: { broadcast: { self: false } } });
     this.channel.on('broadcast', { event: 'sig' }, m => this.onSig(m.payload));
     const status = await new Promise(res => {
@@ -182,6 +184,7 @@ class Net {
 
   // ---- host / join ---------------------------------------------------------------------
   async host(name) {
+    if (this.channel || this.sb) this.leave();
     this.reset();
     this.role = 'host';
     this.name = name || 'Host';
@@ -200,6 +203,7 @@ class Net {
   }
 
   async join(code, name) {
+    if (this.channel || this.sb) this.leave();
     this.reset();
     this.role = 'client';
     this.name = name || 'Player';
@@ -237,10 +241,12 @@ class Net {
     clearInterval(this.roomT);
     if (!quiet && this.channel) this.sig({ t: 'bye' });
     this.reset();
+    this.playT = undefined;
+    this.lastSnap = 0;
+    this.hostBusy = false;
     try { if (this.channel) this.channel.unsubscribe(); } catch (e) {}
     try { if (this.sb) this.sb.removeAllChannels(); } catch (e) {}
     this.channel = null;
-    this.sb = null;
     this.role = null;
     this.state = 'off';
     this.code = '';
@@ -481,14 +487,22 @@ class Net {
         Math.round(t.treadL), Math.round(t.treadR), Math.round(t.missileCharge),
         Math.round(t.score || 0), t.level || 1, Math.round(t.stats.xp || 0), Math.round(t.maxHp)]);
     }
-    const sh = g.shells.map(s => [Math.round(s.x), Math.round(s.y), Math.round(s.angle * 100), SHELL_NET.indexOf(s.kind), Math.round(s.speed)]);
-    const ms = g.missiles.map(m => [Math.round(m.x), Math.round(m.y), Math.round(m.angle * 100), MISSILE_NET.indexOf(m.kind), m.owner ? m.owner.netIdx : -1, Math.round((m.blink || 0) * 100)]);
-    const gr = g.grenades.map(x => [Math.round(x.x), Math.round(x.y), Math.round(x.spin * 100), Math.round(x.fuse * 100)]);
-    const mi = g.mines.map(x => [Math.round(x.x), Math.round(x.y), x.team, x.arm > 0 ? 1 : 0, Math.round(x.blink * 100)]);
-    const sm = g.smokes.map(x => [Math.round(x.x), Math.round(x.y), Math.round(x.r), Math.round(x.life * 100), x.seed]);
-    const ar = g.artillery.map(x => [Math.round(x.x), Math.round(x.y), Math.round(x.h), Math.round(x.tx), Math.round(x.ty), Math.round(x.k * 100), Math.round(x.sx), Math.round(x.sy)]);
-    const as = g.airstrikes.map(x => [Math.round(x.x), Math.round(x.y), Math.round(x.a * 100), Math.round(x.t * 100), x.along === undefined ? 0 : Math.round(x.along), x.owner ? x.owner.netIdx : -1]);
-    return { t: 's', k: g.time, tk, sh, ms, gr, mi, sm, ar, as, ob: this.packObjective(g), ev: this.packEvents(g) };
+    const id = o => o.nid || (o.nid = ++this.oid);
+    const sh = g.shells.map(x => [id(x), Math.round(x.x), Math.round(x.y), SHELL_NET.indexOf(x.kind), Math.round(x.speed), 0, Math.round(x.angle * 100)]);
+    const ms = g.missiles.map(x => [id(x), Math.round(x.x), Math.round(x.y), MISSILE_NET.indexOf(x.kind), x.owner ? x.owner.netIdx : -1, Math.round((x.blink || 0) * 100), Math.round(x.angle * 100)]);
+    const gr = g.grenades.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.spin * 100), Math.round(x.fuse * 100)]);
+    const mi = g.mines.map(x => [id(x), Math.round(x.x), Math.round(x.y), x.team, x.arm > 0 ? 1 : 0, Math.round(x.blink * 100)]);
+    const sm = g.smokes.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.r), Math.round(x.life * 100), x.seed]);
+    const ar = g.artillery.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.h), Math.round(x.tx), Math.round(x.ty), Math.round(x.k * 100), Math.round(x.sx), Math.round(x.sy)]);
+    const as = g.airstrikes.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.a * 100), Math.round(x.t * 100), x.along === undefined ? 0 : Math.round(x.along), x.owner ? x.owner.netIdx : -1]);
+    const snap = { t: 's', k: g.time, tk, sh, ms, gr, mi, sm, ar, as, ob: this.packObjective(g), ev: this.packEvents(g) };
+    // Kills, deaths and damage change slowly: send them a few times a second.
+    this.statT = (this.statT || 0) - 1;
+    if (this.statT <= 0) {
+      this.statT = 5;
+      snap.st = g.tanks.map(t => [t.stats.kills | 0, t.stats.deaths | 0, Math.round(t.stats.damage || 0), t.stats.shots | 0, t.stats.hits | 0, Math.round(t.stats.convoy || 0)]);
+    }
+    return snap;
   }
 
   packObjective(g) {
@@ -543,8 +557,19 @@ class Net {
   onSnapshot(m) {
     this.lastSnap = performance.now();
     m.at = performance.now();
-    this.snapBuf.push(m);
-    if (this.snapBuf.length > 12) this.snapBuf.shift();
+    const gm = this.app.game;
+    if (m.st && gm) {
+      m.st.forEach((r, i) => {
+        const t = gm.tanks[i];
+        if (!t) return;
+        t.stats.kills = r[0]; t.stats.deaths = r[1]; t.stats.damage = r[2];
+        t.stats.shots = r[3]; t.stats.hits = r[4]; t.stats.convoy = r[5];
+      });
+    }
+    const buf = this.snapBuf;
+    if (buf.length && m.k < buf[buf.length - 1].k) return;   // a late packet would rewind the world
+    buf.push(m);
+    if (buf.length > 12) buf.shift();
     const g = this.app.game;
     if (!g) return;
     // Events replay straight away: sounds and effects shouldn't wait for interpolation.
@@ -562,7 +587,8 @@ class Net {
     }
   }
 
-  // Rebuild the world from the two snapshots either side of "now minus a little".
+  // Play the match back on the host's clock, a fraction of a second behind the
+  // newest snapshot, so motion is smooth however unevenly packets arrive.
   clientFrame(dt, g) {
     const buf = this.snapBuf;
     // Nothing from the host for a while: back to the room rather than a frozen battlefield.
@@ -574,20 +600,32 @@ class Net {
       return;
     }
     if (!buf.length) return;
-    const now = performance.now() - NET.interp * 1000;
+    const newest = buf[buf.length - 1];
+    const target = newest.k - NET.interp;
+    if (this.playT === undefined || this.playT > newest.k || this.playT < target - 0.6) this.playT = target;
+    else {
+      // Drift gently toward the target instead of jumping: a step early or late
+      // is far less visible than a snap.
+      const off = target - this.playT;
+      this.playT += dt * clamp(1 + off * 2.5, 0.75, 1.35);
+    }
+    const t0 = this.playT;
     let a = buf[0], b = buf[buf.length - 1];
-    for (let i = 0; i < buf.length - 1; i++) if (buf[i].at <= now && buf[i + 1].at >= now) { a = buf[i]; b = buf[i + 1]; break; }
-    const span = b.at - a.at;
-    const f = span > 0 ? clamp((now - a.at) / span, 0, 1) : 1;
+    for (let i = 0; i < buf.length - 1; i++) if (buf[i].k <= t0 && buf[i + 1].k >= t0) { a = buf[i]; b = buf[i + 1]; break; }
+    const span = b.k - a.k;
+    const f = span > 1e-4 ? clamp((t0 - a.k) / span, 0, 1) : 1;
+    g.time = t0;
     const mine = g.locals[0];
+    const prev = new Map();
+    for (const row of a.tk) prev.set(row[0], row);
     for (const row of b.tk) {
       const t = g.tanks[row[0]];
       if (!t) continue;
-      const prev = a.tk.find(r => r[0] === row[0]) || row;
-      const px = lerp(prev[1], row[1], f), py = lerp(prev[2], row[2], f);
-      const pa = lerpAngle(prev[3] / 100, row[3] / 100, f), pt = lerpAngle(prev[4] / 100, row[4] / 100, f);
-      t.vx = (row[1] - prev[1]) / Math.max(0.001, span / 1000);
-      t.vy = (row[2] - prev[2]) / Math.max(0.001, span / 1000);
+      const p = prev.get(row[0]) || row;
+      const px = lerp(p[1], row[1], f), py = lerp(p[2], row[2], f);
+      const pa = lerpAngle(p[3] / 100, row[3] / 100, f), pt = lerpAngle(p[4] / 100, row[4] / 100, f);
+      t.vx = span > 1e-4 ? (row[1] - p[1]) / span : 0;
+      t.vy = span > 1e-4 ? (row[2] - p[2]) / span : 0;
       t.hp = row[5];
       const flags = row[6];
       const wasAlive = t.alive;
@@ -596,36 +634,71 @@ class Net {
       t.boostT = (flags & 4) ? 1 : 0;
       t.burnT = (flags & 8) ? 1 : 0;
       t.repairing = !!(flags & 16);
-      t.treadL = row[7]; t.treadR = row[8];
+      t.treadL = lerp(p[7], row[7], f); t.treadR = lerp(p[8], row[8], f);
       t.missileCharge = row[9];
       t.score = row[10];
       t.level = row[11];
       t.stats.xp = row[12];
       const wasJug = t.jug;
       t.jug = !!(flags & 32);
-      // The Juggernaut is bigger and tougher: rebuild those numbers when it changes hands.
       if (t.jug !== wasJug) { t.jugHpMul = row[13] / Math.max(1, g.baseHp); t.recalc(g.baseHp); }
       t.maxHp = row[13];
-      if (!wasAlive && t.alive) { t.x = px; t.y = py; }        // respawned: no sliding in from the grave
-      if (t === mine && t.alive) { this.reconcile(t, px, py, pa); continue; }
+      if (!wasAlive && t.alive) { t.x = px; t.y = py; t.angle = pa; }   // respawned: no sliding in from the grave
+      if (t === mine && t.alive) { this.reconcile(dt, t, newest); continue; }
       t.x = px; t.y = py; t.angle = pa; t.turret = pt;
       t.speed = Math.hypot(t.vx, t.vy);
     }
-    this.applyList(g.shells, b.sh, (o, r) => { o.x = r[0]; o.y = r[1]; o.angle = r[2] / 100; o.kind = SHELL_NET[r[3]]; o.speed = r[4]; o.bullet = o.kind === 'bullet' || o.kind === 'coax'; o.flame = o.kind === 'flame'; o.hesh = o.kind === 'hesh'; o.age = o.age || 0.05; o.radius = 4; });
-    this.applyList(g.missiles, b.ms, (o, r) => { o.x = r[0]; o.y = r[1]; o.angle = r[2] / 100; o.kind = MISSILE_NET[r[3]]; o.rocket = o.kind === 'rocket' || o.kind === 'salvo'; o.wire = o.kind === 'wire'; o.owner = g.tanks[r[4]] || null; o.blink = r[5] / 100; o.team = o.owner ? o.owner.team : -1; o.age = o.age || 0.1; o.alive = true; });
-    this.applyList(g.grenades, b.gr, (o, r) => { o.x = r[0]; o.y = r[1]; o.spin = r[2] / 100; o.fuse = r[3] / 100; o.alive = true; });
-    this.applyList(g.mines, b.mi, (o, r) => { o.x = r[0]; o.y = r[1]; o.team = r[2]; o.arm = r[3]; o.blink = r[4] / 100; o.alive = true; o.owner = o.owner || { color: (g.teams[r[2]] || g.teams[0] || {}).color || TEAM_COLORS[0] }; });
-    this.applyList(g.smokes, b.sm, (o, r) => { o.x = r[0]; o.y = r[1]; o.r = r[2]; o.life = r[3] / 100; o.max = SMOKE.life; o.seed = r[4]; });
-    this.applyList(g.artillery, b.ar, (o, r) => { o.x = r[0]; o.y = r[1]; o.h = r[2]; o.tx = r[3]; o.ty = r[4]; o.k = r[5] / 100; o.sx = r[6]; o.sy = r[7]; o.peak = Math.max(1, o.h || 1); });
-    this.applyList(g.airstrikes, b.as, (o, r) => { o.x = r[0]; o.y = r[1]; o.a = r[2] / 100; o.t = r[3] / 100; o.along = r[4]; o.owner = g.tanks[r[5]] || g.tanks[0]; });
+    // Shells, missiles and the rest carry an id so each one keeps its identity
+    // between snapshots; without that they swap places as the lists reshuffle.
+    this.blend(g.shells, a.sh, b.sh, f, (o, r) => {
+      o.angle = r[6] / 100; o.kind = SHELL_NET[r[3]]; o.speed = r[4];
+      o.bullet = o.kind === 'bullet' || o.kind === 'coax';
+      o.flame = o.kind === 'flame'; o.hesh = o.kind === 'hesh';
+      o.age = (o.age || 0) + dt; o.radius = 4;
+    });
+    this.blend(g.missiles, a.ms, b.ms, f, (o, r) => {
+      o.angle = r[6] / 100;
+      o.kind = MISSILE_NET[r[3]];
+      o.rocket = o.kind === 'rocket' || o.kind === 'salvo';
+      o.wire = o.kind === 'wire';
+      o.owner = g.tanks[r[4]] || null;
+      o.blink = r[5] / 100;
+      o.team = o.owner ? o.owner.team : -1;
+      o.age = (o.age || 0) + dt; o.alive = true;
+    });
+    this.blend(g.grenades, a.gr, b.gr, f, (o, r) => { o.spin = r[3] / 100; o.fuse = r[4] / 100; o.alive = true; });
+    this.blend(g.mines, a.mi, b.mi, f, (o, r) => {
+      o.team = r[3]; o.arm = r[4]; o.blink = r[5] / 100; o.alive = true;
+      o.owner = o.owner || { color: (g.teams[r[3]] || g.teams[0] || {}).color || TEAM_COLORS[0] };
+    });
+    this.blend(g.smokes, a.sm, b.sm, f, (o, r) => { o.r = r[3]; o.life = r[4] / 100; o.max = SMOKE.life; o.seed = r[5]; });
+    this.blend(g.artillery, a.ar, b.ar, f, (o, r) => { o.h = r[3]; o.tx = r[4]; o.ty = r[5]; o.k = r[6] / 100; o.sx = r[7]; o.sy = r[8]; o.peak = Math.max(1, o.h || 1); });
+    this.blend(g.airstrikes, a.as, b.as, f, (o, r) => { o.a = r[3] / 100; o.t = r[4] / 100; o.along = r[5]; o.owner = g.tanks[r[6]] || g.tanks[0]; });
     this.applyObjective(g, b.ob);
   }
 
-  applyList(list, rows, fill) {
-    list.length = rows.length;
-    for (let i = 0; i < rows.length; i++) {
-      if (!list[i]) list[i] = {};
-      fill(list[i], rows[i]);
+  // Merge two snapshots of one list. Rows are [id, x, y, ...]; anything in both
+  // is interpolated, anything new appears where it is.
+  blend(list, rowsA, rowsB, f, fill) {
+    const old = this.byId || (this.byId = new Map());
+    old.clear();
+    for (const r of rowsA) old.set(r[0], r);
+    const keep = list.__keep || (list.__keep = new Map());
+    list.length = 0;
+    for (const r of rowsB) {
+      let o = keep.get(r[0]);
+      if (!o) { o = {}; keep.set(r[0], o); }
+      const p = old.get(r[0]);
+      o.nid = r[0];
+      o.x = p ? lerp(p[1], r[1], f) : r[1];
+      o.y = p ? lerp(p[2], r[2], f) : r[2];
+      fill(o, r);
+      list.push(o);
+    }
+    // Forget anything that has gone, so the map can't grow without bound.
+    if (keep.size > rowsB.length * 3 + 40) {
+      const live = new Set(rowsB.map(r => r[0]));
+      for (const id of keep.keys()) if (!live.has(id)) keep.delete(id);
     }
   }
 
@@ -662,13 +735,17 @@ class Net {
 
   // Our own tank is simulated locally so steering feels instant; nudge it back
   // toward the host's version instead of snapping.
-  reconcile(t, x, y, a) {
+  reconcile(dt, t, newest) {
+    const row = newest.tk.find(r => r[0] === t.netIdx);
+    if (!row) return;
+    const x = row[1], y = row[2], a = row[3] / 100;
     const d = dist(t.x, t.y, x, y);
-    if (d > 90) { t.x = x; t.y = y; t.angle = a; return; }
-    const k = clamp(d / 90, 0, 1) * 0.25 + 0.05;
+    if (d > 110) { t.x = x; t.y = y; t.angle = a; return; }   // too far out: take the host's word
+    if (d < 6) return;                                        // close enough: leave it alone
+    const k = 1 - Math.exp(-5 * dt);
     t.x = lerp(t.x, x, k);
     t.y = lerp(t.y, y, k);
-    t.angle = lerpAngle(t.angle, a, 0.12);
+    t.angle = lerpAngle(t.angle, a, 1 - Math.exp(-3 * dt));
   }
 }
 
