@@ -145,6 +145,10 @@ const SKILLS = [
   { id: 4, name: 'Elite',    reaction: 0.14, aimError: 0.02, aimDrift: 2.4, lead: 0.97, fireCone: 0.06, dodge: 0.85, strafe: 0.95, range: 400, retreat: 0.8, fireRate: 1.0,  turret: 1.0 },
 ];
 
+// Frame-rate choices. Capping to the rate the game actually needs keeps a
+// laptop cool and a phone's battery alive; 0 means draw every frame offered.
+const FPS_CAPS = [30, 60, 120, 0];
+
 const DIFFICULTIES = [
   { id: 'easy',   name: 'Recruit', blurb: 'Slow reactions, loose aim.', tiers: [1] },
   { id: 'normal', name: 'Regular', blurb: 'Leads shots, strafes a little.', tiers: [2] },

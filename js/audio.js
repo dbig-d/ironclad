@@ -11,6 +11,7 @@ class Sfx {
     this.muted = false;
     this.budget = 0;
     this.baked = {};      // name -> [AudioBuffer variations]
+    this.pending = new Map();  // sounds waiting for a quiet moment to bake
     this.noBake = false;
   }
 
@@ -31,6 +32,7 @@ class Sfx {
     const d = this.noise.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
     this.startEngine();
+    this.warmCommon();
   }
 
   applyVolume() {
@@ -101,6 +103,11 @@ class Sfx {
   }
 
   // ---- sounds ---------------------------------------------------------------------------
+  // The sounds any battle will fire within seconds.
+  warmCommon() {
+    this.warm(['shot', 'hit', 'explosion', 'ricochet', 'bounce', 'pickup', 'click', 'spawn', 'death', 'mboom']);
+  }
+
   play(name, x, y, listener, extra) {
     if (!this.ac || this.muted || this.ac.state !== 'running') return;
     const range = name === 'explosion' || name === 'mboom' || name === 'longgun' || name === 'bomb' ? 2200 : name === 'plane' ? 3200 : name === 'mbeep' || name === 'mg' || name === 'flame' || name === 'coaxmg' || name === 'bounce' ? 900 : 1400;
@@ -118,8 +125,25 @@ class Sfx {
       src.start();
       return;
     }
-    if (!takes && !this.noBake) this.bake(key, name, extra);
+    if (!takes && !this.noBake && !this.pending.has(key)) this.pending.set(key, { name, extra });
     this.synth(name, o, extra);
+  }
+
+  // Bake one queued sound. Called when there is time to spare — between
+  // rounds, on menus, during the countdown — never mid-battle.
+  pumpBake() {
+    if (this.noBake || !this.ac || this.ac.state !== 'running' || !this.pending.size) return false;
+    const key = this.pending.keys().next().value, job = this.pending.get(key);
+    this.pending.delete(key);
+    if (this.baked[key] && this.baked[key].length) return false;
+    this.bake(key, job.name, job.extra);
+    return true;
+  }
+
+  // Queue the sounds a battle always needs, so the first shot is never the one
+  // that pays for them.
+  warm(names) {
+    for (const n of names) if (!this.baked[n] && !this.pending.has(n)) this.pending.set(n, { name: n, extra: null });
   }
 
   // Render a sound offline into a few buffers (the noise and pitch jitter make each take differ).

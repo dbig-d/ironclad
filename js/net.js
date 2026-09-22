@@ -104,8 +104,9 @@ class NetPeer {
     }
   }
 
-  send(obj) {
-    const s = JSON.stringify(obj);
+  send(obj) { this.sendRaw(JSON.stringify(obj)); }
+
+  sendRaw(s) {
     if (this.open) { try { this.dc.send(s); return; } catch (e) { /* fall through to relay */ } }
     if (this.mode !== 'gone') this.net.sig({ t: 'data', to: this.id, d: s });
   }
@@ -347,6 +348,31 @@ class Net {
   // ---- starting a match ----------------------------------------------------------------
   // Both sides build the same world from the same seed, so only the moving
   // parts have to travel over the wire.
+  // Everyone who will be on the field: the humans in the room, then the bots
+  // that fill the rest of the slots. Both sides compute this the same way, so a
+  // joiner sees the lineup the host is about to launch.
+  lineup() {
+    const L = this.lobby, team = MODES[L.mode].teams;
+    const players = this.roster.slice(0, NET.maxPlayers);
+    const rows = [];
+    const bot = (id, t) => ({ id, name: 'AI crew', team: t, bot: true });
+    if (team) {
+      const used = [0, 0];
+      for (const r of players) used[clamp(r.team | 0, 0, 1)]++;
+      const size = rulesSize(Math.max(L.size, used[0], used[1]));
+      for (let t = 0; t < 2; t++) {
+        const mine = players.filter(r => clamp(r.team | 0, 0, 1) === t);
+        for (const r of mine) rows.push(Object.assign({}, r, { team: t, bot: false }));
+        for (let i = mine.length; i < size; i++) rows.push(bot('b' + t + '_' + i, t));
+      }
+      return { team: true, size, rows };
+    }
+    const size = ffaSize(L.mode, Math.max(L.size, players.length));
+    players.forEach((r, i) => rows.push(Object.assign({}, r, { team: i, bot: false })));
+    for (let i = players.length; i < size; i++) rows.push(bot('b_' + i, i));
+    return { team: false, size, rows };
+  }
+
   start() {
     if (!this.isHost || this.state !== 'lobby') return;
     const L = this.lobby, team = MODES[L.mode].teams;
@@ -439,7 +465,11 @@ class Net {
     }
   }
 
-  everyPeer(msg) { for (const p of this.peers.values()) p.send(msg); }
+  everyPeer(msg) {
+    if (this.peers.size < 2) { for (const p of this.peers.values()) p.send(msg); return; }
+    const s = JSON.stringify(msg);
+    for (const p of this.peers.values()) p.sendRaw(s);
+  }
 
   // ---- host: read remote inputs, publish the world ---------------------------------------
   applyRemoteInput(peer, m) {
@@ -476,7 +506,8 @@ class Net {
     this.sendT -= dt;
     const fastest = [...this.peers.values()].every(p => p.mode === 'p2p');
     if (this.sendT > 0) return;
-    this.sendT = 1 / (fastest ? NET.snapHz : NET.relaySnapHz);
+    const busy = game.tanks.length > 16 ? 0.7 : 1;
+    this.sendT = 1 / ((fastest ? NET.snapHz : NET.relaySnapHz) * busy);
     const snap = this.packSnapshot(game);
     this.everyPeer(snap);
     this.pingT = (this.pingT || 0) - 1;
@@ -491,8 +522,7 @@ class Net {
         (t.alive ? 1 : 0) | (t.input.fire ? 2 : 0) | (t.boostT > 0 ? 4 : 0) | (t.burnT > 0 ? 8 : 0) | (t.repairing ? 16 : 0) | (t.jug ? 32 : 0)
           | (t.shield > 0 ? 64 : 0) | (t.invuln > 0 ? 128 : 0) | (t.flakT > 0 ? 256 : 0) | (t.repairT > 0 ? 512 : 0) | (t.overheatT > 0 ? 1024 : 0),
         Math.round(t.treadL), Math.round(t.treadR), Math.round(t.missileCharge),
-        Math.round(t.score || 0), t.level || 1, Math.round(t.stats.xp || 0), Math.round(t.maxHp),
-        Math.round(t.reload * 100), Math.round(t.heat || 0), t.grenadeAmmo | 0, Math.round((t.flakAngle || 0) * 100)]);
+        Math.round(t.reload * 100), Math.round(t.heat || 0), Math.round((t.flakAngle || 0) * 100)]);
     }
     const id = o => o.nid || (o.nid = ++this.oid);
     const sh = g.shells.map(x => [id(x), Math.round(x.x), Math.round(x.y), SHELL_NET.indexOf(x.kind), Math.round(x.speed), 0, Math.round(x.angle * 100)]);
@@ -506,8 +536,9 @@ class Net {
     // Kills, deaths and damage change slowly: send them a few times a second.
     this.statT = (this.statT || 0) - 1;
     if (this.statT <= 0) {
-      this.statT = 5;
-      snap.st = g.tanks.map(t => [t.stats.kills | 0, t.stats.deaths | 0, Math.round(t.stats.damage || 0), t.stats.shots | 0, t.stats.hits | 0, Math.round(t.stats.convoy || 0)]);
+      this.statT = 4;
+      snap.st = g.tanks.map(t => [t.stats.kills | 0, t.stats.deaths | 0, Math.round(t.stats.damage || 0), t.stats.shots | 0, t.stats.hits | 0,
+        Math.round(t.stats.convoy || 0), Math.round(t.score || 0), t.level || 1, Math.round(t.stats.xp || 0), Math.round(t.maxHp), t.grenadeAmmo | 0]);
     }
     return snap;
   }
@@ -579,6 +610,7 @@ class Net {
         if (!t) return;
         t.stats.kills = r[0]; t.stats.deaths = r[1]; t.stats.damage = r[2];
         t.stats.shots = r[3]; t.stats.hits = r[4]; t.stats.convoy = r[5];
+        t.score = r[6]; t.level = r[7]; t.stats.xp = r[8]; t.maxHp = r[9]; t.grenadeAmmo = r[10];
       });
     }
     const buf = this.snapBuf;
@@ -672,19 +704,14 @@ class Net {
       t.flakT = (flags & 256) ? 1 : 0;
       t.repairT = (flags & 512) ? 1 : 0;
       t.overheatT = (flags & 1024) ? 1 : 0;
-      t.reload = row[14] / 100;
-      t.heat = row[15];
-      t.grenadeAmmo = row[16];
-      t.flakAngle = row[17] / 100;
+      t.reload = row[10] / 100;
+      t.heat = row[11];
+      t.flakAngle = row[12] / 100;
       t.treadL = lerp(p[7], row[7], f); t.treadR = lerp(p[8], row[8], f);
       t.missileCharge = row[9];
-      t.score = row[10];
-      t.level = row[11];
-      t.stats.xp = row[12];
       const wasJug = t.jug;
       t.jug = !!(flags & 32);
-      if (t.jug !== wasJug) { t.jugHpMul = row[13] / Math.max(1, g.baseHp); t.recalc(g.baseHp); }
-      t.maxHp = row[13];
+      if (t.jug !== wasJug) { t.jugHpMul = t.maxHp / Math.max(1, g.baseHp); t.recalc(g.baseHp); }
       if (!wasAlive && t.alive) { t.x = px; t.y = py; t.angle = pa; }   // respawned: no sliding in from the grave
       if (t === mine && t.alive) { this.reconcile(dt, t, newest); continue; }
       t.x = px; t.y = py; t.angle = pa; t.turret = pt;

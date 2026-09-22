@@ -137,9 +137,36 @@ function mixColor(a, b, t) {
 function shade(hex, amt) {
   return amt >= 0 ? mixColor(hex, '#ffffff', amt) : mixColor(hex, '#000000', -amt);
 }
+// HUD bars: scale rather than resize, and only when the value really changed.
+// A width change lays the page out again; a transform is only composited.
+function setBar(owner, key, v) {
+  const el = owner[key];
+  if (!el) return;
+  const k = Math.round(clamp(v, 0, 1) * 500) / 500;
+  const seen = key + '_was';
+  if (owner[seen] === k) return;
+  owner[seen] = k;
+  el.style.transform = 'scaleX(' + k + ')';
+}
+
+// Drop everything whose life has run out, in place, order not preserved.
+function reapDead(list) {
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].life <= 0) { list[i] = list[list.length - 1]; list.pop(); }
+  }
+}
+
+// The same few colours are rebuilt into strings every frame: remember them.
+const RGBA_MEMO = new Map();
 function rgba(hex, a) {
-  const [r, g, b] = hexToRgb(hex);
-  return `rgba(${r},${g},${b},${a})`;
+  const key = hex + '|' + a;
+  let s = RGBA_MEMO.get(key);
+  if (s === undefined) {
+    const [r, g, b] = hexToRgb(hex);
+    s = `rgba(${r},${g},${b},${a})`;
+    if (RGBA_MEMO.size < 4096) RGBA_MEMO.set(key, s);
+  }
+  return s;
 }
 function hsl(h, s, l) { return `hsl(${h},${s}%,${l}%)`; }
 function hslToHex(h, s, l) {

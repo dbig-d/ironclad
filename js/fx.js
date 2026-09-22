@@ -24,12 +24,19 @@ class FX {
     this.damageDirs = [];
     this.density = 1;                       // set by the renderer's quality tier
     this.maxParts = LOW_MEM ? 900 : 1800;
+    this.partCap = this.maxParts;
     this.tracers = [];   // anti-air tracer lines
     this.markers = [];   // airstrike marking smoke
   }
 
+  // Called when the quality governor moves a tier.
+  setDensity(density) {
+    this.density = density;
+    this.partCap = Math.round(this.maxParts * (0.35 + 0.65 * density));
+  }
+
   spawn(type, x, y, vx, vy, life, size, extra) {
-    if (this.parts.length > this.maxParts) return null;
+    if (this.parts.length > this.partCap) return null;
     // Lower quality tiers thin out the cosmetic smoke, dust, sparks and debris.
     if (this.density < 1 && type <= P_DUST && type !== P_FIRE && Math.random() > this.density) return null;
     const p = this.pool.pop() || {};
@@ -454,13 +461,13 @@ class FX {
       if (this.parts[i].life <= 0) { this.pool.push(this.parts[i]); this.parts[i] = this.parts[this.parts.length - 1]; this.parts.pop(); }
     }
     for (const n of this.numbers) { n.life -= dt; n.y += n.vy * dt; n.vy *= Math.exp(-3 * dt); }
-    this.numbers = this.numbers.filter(n => n.life > 0);
+    reapDead(this.numbers);
     for (const f of this.flashes) f.life -= dt;
-    this.flashes = this.flashes.filter(f => f.life > 0);
+    reapDead(this.flashes);
     for (const l of this.lights) l.life -= dt;
-    this.lights = this.lights.filter(l => l.life > 0);
+    reapDead(this.lights);
     for (const tr of this.tracers) tr.life -= dt;
-    if (this.tracers.length) this.tracers = this.tracers.filter(tr => tr.life > 0);
+    reapDead(this.tracers);
     // Airstrike marking smoke: a column of red smoke on the target until the bombs land.
     for (const m of this.markers) {
       m.life -= dt;

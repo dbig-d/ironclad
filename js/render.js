@@ -62,7 +62,7 @@ class Renderer {
     const q = clamp(this.quality + dir, 0, QUALITY.length - 1);
     if (q === this.quality) return false;
     this.quality = q;
-    if (this.fx) this.fx.density = this.Q.density;
+    if (this.fx) this.fx.setDensity(this.Q.density);
     this.resize();
     return true;
   }
@@ -96,7 +96,7 @@ class Renderer {
     this.game = game;
     this.terrain = new Terrain(game.map);
     this.fx = new FX(this.terrain);
-    this.fx.density = this.Q.density;
+    this.fx.setDensity(this.Q.density);
     this.setSplit(Math.max(1, humans.length));
     this.views.forEach((v, i) => {
       v.player = humans[i] || null;
@@ -145,6 +145,7 @@ class Renderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = '#0b0d0a';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    this.bucketParticles();
 
     for (const view of this.views) {
       this.view = view;
@@ -167,7 +168,7 @@ class Renderer {
       this.drawMines(ctx, v, view);
       this.drawStrikeMarks(ctx);
       this.drawWrecks(ctx, v);
-      this.drawParticles(ctx, v, [P_DUST], false);
+      this.drawParticles(ctx, v, this.pDust);
       const seen = t => t.alive && this.inView(t, v) && this.visibleTo(t, view);
       for (const t of g.tanks) if (seen(t)) this.drawTankShadow(ctx, t);
       this.drawObstacles(ctx, v, false);
@@ -176,7 +177,7 @@ class Renderer {
       this.drawFlags(ctx, true);
       const night = g.night;
       if (!night) { this.drawShells(ctx, v); this.drawMissiles(ctx, v); this.drawGrenades(ctx, v); }
-      this.drawParticles(ctx, v, [P_SMOKE, P_DEBRIS], false);
+      this.drawParticles(ctx, v, this.pGround);
       this.drawAdditive(ctx, v);
       this.drawSmokes(ctx, v);
       if (!night) this.drawArtillery(ctx, v);
@@ -301,20 +302,32 @@ class Renderer {
   drawGroundMarks(ctx) {
     const g = this.game, m = g.map, t = this.time;
     if (m.layout === 'teams') {
-      m.spawnCenters.forEach((cs, team) => {
-        const col = g.teams[team].color;
-        for (const cc of cs) {
-          const cx = cc.x + (team === 0 ? 20 : -20), w = 300, h = 330;
-          ctx.fillStyle = rgba(col.main, 0.1);
-          ctx.fillRect(cx - w / 2, cc.y - h / 2, w, h);
-          ctx.strokeStyle = rgba(col.ui, 0.75);
-          ctx.lineWidth = 4;
-          const L = 34;
-          for (const [bx, by, dx, dy] of [[cx - w / 2, cc.y - h / 2, 1, 1], [cx + w / 2, cc.y - h / 2, -1, 1], [cx - w / 2, cc.y + h / 2, 1, -1], [cx + w / 2, cc.y + h / 2, -1, -1]]) {
-            ctx.beginPath(); ctx.moveTo(bx + dx * L, by); ctx.lineTo(bx, by); ctx.lineTo(bx, by + dy * L); ctx.stroke();
+      let pads = this.pads;
+      if (!pads || pads.map !== m) {
+        pads = this.pads = { map: m, list: [] };
+        m.spawnCenters.forEach((cs, team) => {
+          const col = g.teams[team].color, w = 300, h = 330, L = 34;
+          for (const cc of cs) {
+            const cx = cc.x + (team === 0 ? 20 : -20), x0 = cx - w / 2, x1 = cx + w / 2, y0 = cc.y - h / 2, y1 = cc.y + h / 2;
+            pads.list.push({
+              fill: rgba(col.main, 0.1), stroke: rgba(col.ui, 0.75), x: x0, y: y0, w, h,
+              corners: [x0, y0, L, L, x1, y0, -L, L, x0, y1, L, -L, x1, y1, -L, -L],
+            });
           }
+        });
+      }
+      ctx.lineWidth = 4;
+      for (const p of pads.list) {
+        ctx.fillStyle = p.fill;
+        ctx.fillRect(p.x, p.y, p.w, p.h);
+        ctx.strokeStyle = p.stroke;
+        ctx.beginPath();
+        for (let i = 0; i < 16; i += 4) {
+          const bx = p.corners[i], by = p.corners[i + 1];
+          ctx.moveTo(bx + p.corners[i + 2], by); ctx.lineTo(bx, by); ctx.lineTo(bx, by + p.corners[i + 3]);
         }
-      });
+        ctx.stroke();
+      }
     }
     if (g.mode instanceof CTFMode) {
       for (const f of g.mode.flags) {
@@ -1015,10 +1028,23 @@ class Renderer {
     }
   }
 
-  drawParticles(ctx, v, types, additive) {
-    const tints = FxArt.tints;
+  // Sort the particles into their draw passes once a frame.
+  bucketParticles() {
+    const dust = this.pDust || (this.pDust = []);
+    const ground = this.pGround || (this.pGround = []);
+    const add = this.pAdd || (this.pAdd = []);
+    dust.length = 0; ground.length = 0; add.length = 0;
     for (const p of this.fx.parts) {
-      if (!types.includes(p.type) || p.x < v.x0 || p.x > v.x1 || p.y < v.y0 || p.y > v.y1) continue;
+      if (p.type === P_DUST) dust.push(p);
+      else if (p.type === P_SMOKE || p.type === P_DEBRIS) ground.push(p);
+      else add.push(p);
+    }
+  }
+
+  drawParticles(ctx, v, list) {
+    const tints = FxArt.tints;
+    for (const p of list) {
+      if (p.x < v.x0 || p.x > v.x1 || p.y < v.y0 || p.y > v.y1) continue;
       const k = p.life / p.max;
       if (p.type === P_DEBRIS) {
         ctx.save();
@@ -1047,7 +1073,7 @@ class Renderer {
       ctx.globalAlpha = (l.life / l.max) * 0.5;
       ctx.drawImage(tints[l.c] || tints.glow, l.x - l.r, l.y - l.r, l.r * 2, l.r * 2);
     }
-    for (const p of fx.parts) {
+    for (const p of this.pAdd) {
       if (p.x < v.x0 || p.x > v.x1 || p.y < v.y0 || p.y > v.y1) continue;
       const k = p.life / p.max;
       if (p.type === P_FIRE) {

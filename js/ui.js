@@ -42,7 +42,7 @@ class UI {
     this.app = app;
     this.settings = Object.assign({
       mode: 'tdm', size: 4, brSize: 10, jugSize: 6, difficulty: 'normal', biome: 'random', steering: 'tank',
-      volume: 0.7, party: 'solo', hits: HITS.default,
+      volume: 0.7, party: 'solo', hits: HITS.default, fpsCap: 60,
       progression: 'standard', loadout: Object.assign({}, DEFAULT_LOADOUT), botLoadout: 'standard',
       playerName: '', p2Name: '',
     }, this.load());
@@ -380,24 +380,42 @@ class UI {
     }
     // Lobby.
     const host = net.isHost, L = net.lobby, team = MODES[L.mode].teams;
-    const rows = net.roster.map(r => `<div class="on-row">
-        <span class="nm">${esc2(r.name)}</span>
+    const line = net.lineup();
+    const diff = DIFFICULTIES.find(d => d.id === (L.difficulty || 'normal')) || DIFFICULTIES[1];
+    const chev = n => n ? `<span class="chev">${'<i></i>'.repeat(n)}</span>` : '';
+    const botLabel = diff.id === 'mixed' ? 'Mixed' : diff.name;
+    // One row per tank. A long battle royale lineup is summed up instead of listed.
+    const row = r => `<div class="on-row${r.bot ? ' bot' : ''}">
+        <span class="nm">${r.bot ? 'AI crew' : esc2(r.name)}</span>
         ${r.you ? '<span class="on-tag you">You</span>' : ''}
         ${r.host ? '<span class="on-tag">Host</span>' : ''}
-        ${!r.you && r.mode === 'relay' ? '<span class="on-tag relay">Relayed</span>' : ''}
-        ${!r.you && r.ping ? `<span class="on-tag">${r.ping} ms</span>` : ''}
+        ${r.bot ? `<span class="on-tag ai">${botLabel}${chev(diff.id === 'mixed' ? 0 : diff.tiers[0])}</span>` : ''}
+        ${!r.you && !r.bot && r.mode === 'relay' ? '<span class="on-tag relay">Relayed</span>' : ''}
+        ${!r.you && !r.bot && r.ping ? `<span class="on-tag">${r.ping} ms</span>` : ''}
         <span class="sp"></span>
-        ${team ? `<span class="on-teams">${[0, 1].map(t => `<button type="button" class="${r.team === t ? 'on' : ''}" data-team="${t}" data-id="${r.id}" ${host ? '' : 'disabled'}>${t === 0 ? 'A' : 'B'}</button>`).join('')}</span>` : ''}
-      </div>`).join('');
+        ${team && !r.bot ? `<span class="on-teams">${[0, 1].map(t => `<button type="button" class="${r.team === t ? 'on' : ''}" data-team="${t}" data-id="${r.id}" ${host ? '' : 'disabled'}>${t === 0 ? 'A' : 'B'}</button>`).join('')}</span>` : ''}
+      </div>`;
+    const listOf = (rs, cap) => {
+      const shown = rs.slice(0, cap), hidden = rs.length - shown.length;
+      return shown.map(row).join('') + (hidden > 0 ? `<p class="on-more">+${hidden} more AI crews</p>` : '');
+    };
+    const lineHtml = line.team
+      ? `<div class="on-sides">${[0, 1].map(t => `<div class="on-side">
+            <h3 class="label">${t === 0 ? 'Cobalt' : 'Ember'} <span>${line.size}</span></h3>
+            ${listOf(line.rows.filter(r => r.team === t), 7)}
+          </div>`).join('')}</div>`
+      : `<div class="on-players"><h3 class="label">Lineup <span>${line.size}</span></h3>${listOf(line.rows, 10)}</div>`;
     el.innerHTML = `${host ? `<div class="on-codebox"><span class="label">Room code</span><b>${net.code}</b><button type="button" class="btn ghost small" id="on-copy">Copy</button></div>`
         : `<p class="on-wait">Room ${net.code} · ${net.hostBusy ? 'a match is running · you play the next one' : 'waiting for the host to start'}</p>`}
-      <div class="on-players">${rows}</div>
+      ${lineHtml}
       ${host ? `<section class="field"><h2 class="label">Operation</h2><div class="seg" id="on-mode"></div></section>
         <section class="field split"><div><h2 class="label">Squad size</h2><div class="seg" id="on-size"></div></div>
           <div><h2 class="label">Armor</h2><div class="seg" id="on-hits"></div></div></section>
+        <section class="field"><h2 class="label">AI crews</h2><div class="seg" id="on-diff"></div>
+          <p class="hint">${esc2(diff.blurb)}</p></section>
         <section class="field"><h2 class="label">Progression</h2><div class="seg" id="on-prog"></div>
           <p class="hint">${PROG_HINT[L.progression || 'standard']}</p></section>`
-        : `<p class="hint">${MODES[L.mode].name} \u00b7 ${team ? L.size + 'v' + L.size : L.size + ' tanks'} \u00b7 ${L.hits} hits \u00b7 ${(L.progression || 'standard')}</p>`}
+        : `<p class="hint">${MODES[L.mode].name} · ${team ? L.size + 'v' + L.size : L.size + ' tanks'} · ${L.hits} hits · AI ${botLabel} · ${(L.progression || 'standard')}</p>`}
       <div class="on-foot">
         ${host ? '<button type="button" class="btn big" id="on-start">Start match</button>' : ''}
         <button type="button" class="btn ghost" id="on-leave">Leave</button>
@@ -411,6 +429,8 @@ class UI {
       this.radio($('on-mode'), NET.modes.map(id => ({ value: id, label: MODES[id].name })), L.mode, v => net.setLobby({ mode: v }), it => it.label);
       this.radio($('on-prog'), [{ value: 'standard', label: 'Standard' }, { value: 'leveling', label: 'Leveling' }, { value: 'freeplay', label: 'Freeplay' }],
         L.progression || 'standard', v => net.setLobby({ progression: v }), it => it.label);
+      this.radio($('on-diff'), DIFFICULTIES.map(d => ({ value: d.id, d })), diff.id, v => net.setLobby({ difficulty: v }),
+        it => it.d.name + chev(it.d.id === 'mixed' ? 0 : it.d.tiers[0]));
       const teams = MODES[L.mode].teams;
       const sizes = teams ? [1, 2, 4] : L.mode === 'jug' ? JUG_SIZES : [6, 10, 20];
       this.radio($('on-size'), sizes.map(n => ({ value: n, label: teams ? n + 'v' + n : n + ' tanks' })), sizes.includes(L.size) ? L.size : sizes[1], v => net.setLobby({ size: v }), it => it.label);
@@ -656,7 +676,7 @@ class UI {
     if (el.segs !== segs) { el.segs = segs; el.root.style.setProperty('--segs', segs); }
     el.auto.classList.toggle('on', !!auto);
     const cost = game.specialCost(p), mf = clamp(p.missileCharge / cost, 0, 1);
-    el.msFill.style.width = (mf * 100).toFixed(1) + '%';
+    setBar(el, 'msFill', mf);
     const ready = mf >= 1;
     const spName = PART_SHORT[p.loadout.special];
     const msTxt = p.boostT > 0 ? 'Overdrive' : p.repairT > 0 ? 'Repairing' : p.flakT > 0 ? 'Anti-air · ' + Math.ceil(p.flakT) + 's'
@@ -666,13 +686,13 @@ class UI {
     if (el.xpFill) {
       const lvl = p.level, lo = lvl > 1 ? XP.levels[lvl - 2] : 0, hi = XP.levels[lvl - 1];
       const xp = Math.floor(p.stats.xp);
-      el.xpFill.style.width = hi ? (clamp((xp - lo) / (hi - lo), 0, 1) * 100).toFixed(1) + '%' : '100%';
+      setBar(el, 'xpFill', hi ? clamp((xp - lo) / (hi - lo), 0, 1) : 1);
       const lv = 'LV ' + lvl, num = hi ? `${xp} / ${hi} XP` : `${xp} XP · max`;
       if (el.xpLvl.textContent !== lv) el.xpLvl.textContent = lv;
       if (el.xpNum.textContent !== num) el.xpNum.textContent = num;
     }
     const hpf = clamp(p.hp / p.maxHp, 0, 1);
-    el.hp.style.width = (hpf * 100).toFixed(1) + '%';
+    setBar(el, 'hp', hpf);
     const cls = 'pp-hp' + (p.repairing ? ' repair' : hpf < 0.3 ? ' low' : hpf < 0.6 ? ' mid' : '');
     if (el.hp.className !== cls) el.hp.className = cls;
     const num = game.oneShot ? (p.alive ? '1 HIT' : '0') : String(Math.ceil(Math.max(0, p.hp)));
@@ -680,7 +700,7 @@ class UI {
     // Machine gun / flamethrower: the bar shows heat instead of reload.
     const mg = p.loadout.weapon === 'mg' || p.loadout.weapon === 'flame';
     const rl = p.alive ? (mg ? p.heat / 100 : 1 - p.reload / p.reloadTime) : 0;
-    el.rl.style.width = (rl * 100).toFixed(1) + '%';
+    setBar(el, 'rl', rl);
     el.rl.classList.toggle('heat', mg);
     const txt = !p.alive ? '—' : p.repairing ? 'REPAIRING' : mg ? (p.overheatT > 0 ? 'OVERHEAT' : 'HEAT') : rl >= 1 ? 'READY' : 'LOADING';
     const lcls = 'pp-lbl' + (p.repairing && p.alive ? ' fix' : mg ? (p.overheatT > 0 ? ' hot' : '') : rl >= 1 ? '' : ' wait');
@@ -862,6 +882,8 @@ class UI {
   }
 
   showPause(show) {
+    this.radio($('p-fps'), FPS_CAPS.map(n => ({ value: n, label: n ? n + ' fps' : 'Uncapped' })), this.settings.fpsCap,
+      v => { this.settings.fpsCap = v; this.save(); this.app.setFpsCap(v); }, it => it.label);
     $('pause').hidden = !show;
     document.body.classList.toggle('playing', !show);
   }

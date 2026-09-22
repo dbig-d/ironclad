@@ -12,6 +12,7 @@ const App = {
     this.ui = new UI(this);
     this.net = new Net(this);
     this.sfx.setVolume(this.ui.settings.volume);
+    this.setFpsCap(this.ui.settings.fpsCap);
     this.paused = false;
     this.locks = [null, null];
     this.spectate = [null, null];
@@ -77,6 +78,9 @@ const App = {
     this.steering = s.steering;
     this.game = new Game(s);
     this.renderer.setGame(this.game, this.game.players);
+    // Sprites this battle will need, built through the countdown rather than
+    // during the first firefight.
+    this.warmJobs = TankArt.warmJobs(this.game);
     this.state = 'playing';
     this.paused = false;
     this.locks = [null, null];
@@ -203,8 +207,25 @@ const App = {
     this.ui.showPause(p);
   },
 
+  // Draw no faster than the game needs. A 120 Hz screen gets the same battle
+  // for half the work, which is the difference between a warm laptop and a loud
+  // one; the menus idle slower still, since nothing there is being played.
+  setFpsCap(fps) {
+    this.frameInterval = fps > 0 ? 1000 / fps : 0;
+    this.nextFrame = 0;
+  },
+
   loop(now) {
     requestAnimationFrame(t => this.loop(t));
+    // Keep to the chosen rate on a fixed cadence: aiming at slots rather than
+    // measuring gaps means a 120 Hz screen lands on an even half instead of
+    // stuttering between skipped and drawn frames. Menus idle slower still.
+    const idle = this.state !== 'playing' || this.paused;
+    const interval = idle ? Math.max(this.frameInterval || 0, 33.3) : this.frameInterval || 0;
+    if (interval) {
+      if (now < this.nextFrame) return;
+      this.nextFrame = Math.max(now + 1, this.nextFrame + interval);
+    }
     const raw = now - this.last;
     const dt = Math.min(0.05, raw / 1000);
     this.last = now;
@@ -224,13 +245,16 @@ const App = {
   govern(ms) {
     const P = this.perf || (this.perf = { ema: 16.7, low: 0, high: 0, wait: 8000, drops: 0 });
     if (ms > 250) return;  // tab switch or a hitch, not a trend
+    // Judge frames against the rate we asked for, not always 60: a 30 fps cap
+    // is a choice, not a struggling machine.
+    const target = this.frameInterval || 16.7;
     P.ema += (ms - P.ema) * 0.06;
-    if (P.ema > 21.5) { P.low += ms; P.high = 0; }
-    else if (P.ema < 17.8) { P.high += ms; P.low = 0; }
+    if (P.ema > target * 1.29) { P.low += ms; P.high = 0; }
+    else if (P.ema < target * 1.07) { P.high += ms; P.low = 0; }
     else { P.low = 0; P.high = 0; }
     if (P.low > 1500) {
       P.low = 0;
-      if (this.renderer.setQuality(-1)) { P.drops++; P.wait = 8000 * Math.pow(2, P.drops); P.ema = 16.7; }
+      if (this.renderer.setQuality(-1)) { P.drops++; P.wait = 8000 * Math.pow(2, P.drops); P.ema = target; }
     } else if (P.high > P.wait) {
       P.high = 0;
       this.renderer.setQuality(1);
@@ -326,6 +350,15 @@ const App = {
       this.processEvents();
       r.fx.update(simDt, g);
       if (this.net.isHost && playing) this.net.hostFrame(dt, g);
+    }
+
+    // A quiet moment: build one sprite and bake one sound, so the first kill of
+    // the match is not the frame that pays for both.
+    const quiet = !playing || this.paused || g.phase === 'intro' || g.phase === 'over';
+    if (quiet) {
+      const jobs = this.warmJobs;
+      if (jobs && jobs.length) { for (let i = 0; i < 3 && jobs.length; i++) jobs.shift()(); }
+      else this.sfx.pumpBake();
     }
 
     // Cameras: one per view.

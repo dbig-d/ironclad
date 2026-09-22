@@ -640,6 +640,25 @@ const TankArt = {
   getConvoy(color) {
     return this.convoy[color.main] || (this.convoy[color.main] = makeConvoySprite(color));
   },
+  // Building a sprite the first time it is needed costs tens of milliseconds on
+  // a phone, and the first time is usually the first kill. Hand back the work as
+  // a list of jobs so the countdown can do it instead.
+  warmJobs(game) {
+    const jobs = [];
+    const colors = [];
+    for (const t of game.tanks) if (!colors.includes(t.color)) colors.push(t.color);
+    const hulls = [];
+    for (const t of game.tanks) { const h = t.loadout && t.loadout.hull; if (h && !hulls.includes(h)) hulls.push(h); }
+    for (const c of colors) {
+      jobs.push(() => this.get(c));
+      for (const h of hulls) jobs.push(() => this.hull(c, h));
+      if (game.tanks.some(t => t.isConvoy && t.color === c)) jobs.push(() => this.getConvoy(c));
+    }
+    jobs.push(() => this.getWreck());
+    jobs.push(() => this.getShadows());
+    return jobs;
+  },
+
   wreck: null,
   getWreck() {
     if (!this.wreck) {
