@@ -434,11 +434,24 @@ class HudPainter {
       for (const a of g.tanks) if (a.alive && a.team === myTeam && dist2(a.x, a.y, t.x, t.y) < seeR * seeR) return true;
       return false;
     };
+    // Ordinary dots are gathered into one path per colour and drawn together.
+    const dots = this.dots || (this.dots = new Map());
+    for (const d of dots.values()) d.n = 0;
     for (const t of g.tanks) {
       if (!t.alive || t.isPlayer) continue;
       const ally = t.team === myTeam;
       if (!ally && myTeam >= 0 && !spotted(t)) continue;
-      const [x, y] = P(t.x, t.y);
+      const x = x0 + t.x * sc, y = y0 + t.y * sc;
+      if (!t.isConvoy && !t.jug && !t.ace) {
+        const key = t.color.ui + (ally ? '|a' : '|e');
+        let d = dots.get(key);
+        if (!d) dots.set(key, d = { color: t.color.ui, ally, n: 0, path: null });
+        if (!d.n) d.path = new Path2D();
+        d.n++;
+        const r = ally ? 2.6 : 3;
+        d.path.moveTo(x + r, y); d.path.arc(x, y, r, 0, TAU);
+        continue;
+      }
       if (t.isConvoy) {
         ctx.save();
         ctx.translate(x, y); ctx.rotate(Math.PI / 4);
@@ -448,15 +461,15 @@ class HudPainter {
         ctx.restore();
         continue;
       }
-      if (t.jug || t.ace) {
-        ctx.fillStyle = t.ace ? '#ff7a52' : '#ffc850';
-        ctx.beginPath(); ctx.arc(x, y, 5, 0, TAU); ctx.fill();
-        ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 1; ctx.stroke();
-        continue;
-      }
-      ctx.fillStyle = t.color.ui;
-      ctx.beginPath(); ctx.arc(x, y, ally ? 2.6 : 3, 0, TAU); ctx.fill();
-      if (!ally) { ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 1; ctx.stroke(); }
+      ctx.fillStyle = t.ace ? '#ff7a52' : '#ffc850';
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, TAU); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    for (const d of dots.values()) {
+      if (!d.n) continue;
+      ctx.fillStyle = d.color;
+      ctx.fill(d.path);
+      if (!d.ally) { ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 1; ctx.stroke(d.path); }
     }
     if (g.mode instanceof CTFMode) {
       for (const f of g.mode.flags) {

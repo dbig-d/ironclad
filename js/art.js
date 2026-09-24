@@ -503,6 +503,7 @@ const GearArt = {
     ctx.scale(GEAR_RES, GEAR_RES);
     draw(ctx);
     this.cache.set(key, c);
+    toBitmap(c, b => this.cache.set(key, b));
     return c;
   },
   tread(h, len, frame) {
@@ -629,12 +630,18 @@ const TankArt = {
       s = { hulls: {}, turret: makeTurretSprite(color), barrel: makeBarrelSprite(color), launcher: makeLauncherSprite(color), longBarrel: makeLongBarrelSprite(color), stub: makeStubBarrelSprite(color), rail: makeRailSprite(color) };
       s.hull = s.hulls.standard = makeHullSprite(color);
       this.cache.set(key, s);
+      for (const k of ['turret', 'barrel', 'launcher', 'longBarrel', 'stub', 'rail']) toBitmap(s[k], b => { s[k] = b; });
+      toBitmap(s.hull, b => { s.hull = s.hulls.standard = b; });
     }
     return s;
   },
   hull(color, variant) {
     const s = this.get(color);
-    return s.hulls[variant] || (s.hulls[variant] = makeHullSprite(color, false, variant));
+    if (!s.hulls[variant]) {
+      s.hulls[variant] = makeHullSprite(color, false, variant);
+      toBitmap(s.hulls[variant], b => { s.hulls[variant] = b; if (variant === 'standard') s.hull = b; });
+    }
+    return s.hulls[variant];
   },
   convoy: {},
   getConvoy(color) {
@@ -676,6 +683,9 @@ const TankArt = {
           ctx.translate(-4, 0); turretPath(ctx); ctx.fill(); ctx.fillRect(10, -3, 30, 6);
         }, 3),
       };
+      const sh = this.shadows;
+      toBitmap(sh.hull, b => { sh.hull = b; });
+      toBitmap(sh.turret, b => { sh.turret = b; });
     }
     return this.shadows;
   },
@@ -1490,6 +1500,7 @@ const FxArt = {
       cx.fillStyle = col;
       cx.fillRect(0, 0, s, s);
       this.tints[k] = c;
+      toBitmap(c, b => { this.tints[k] = b; });
     }
 
     // Guided missile, nose pointing +x (drawn at 2x for crisp rotation).

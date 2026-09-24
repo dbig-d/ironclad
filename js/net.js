@@ -15,14 +15,26 @@ const NET = {
   // policies allow, and we use it for realtime broadcast alone.
   anon: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFuYWZpYnVxeGFxd3N5Ynpub2JqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4OTEzMDIsImV4cCI6MjEwNTQ2NzMwMn0.NpzBh9Z1dI6WiLVWE8srUd92KBV27MoO4JEMr20gVG0',
   lib: 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js',
-  ice: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }],
+  ice: [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    // A TURN server lets two phones on mobile data (which often can't reach
+    // each other directly) talk without the slow Supabase relay. Add one here:
+    // { urls: 'turn:your.turn.host:3478', username: '...', credential: '...' },
+  ],
   home: 'dbig-d.github.io/ironclad',   // where online play actually works
   maxPlayers: 4,
-  snapHz: 22,          // world updates per second over a direct connection
+  snapHz: 30,          // world updates per second over a direct connection
   relaySnapHz: 10,     // slower when bouncing through Supabase
-  inputHz: 30,
+  inputHz: 60,         // most input sends per second over a direct connection (only when it changes)
+  relayInputHz: 20,
+  inputIdle: 1 / 12,   // resend unchanged input this often, in case a packet was lost
   p2pTimeout: 9000,    // give up on a direct connection after this and relay
-  interp: 0.1,         // render this far behind the host, in seconds
+  // Joiners render the world this far behind the newest snapshot. It adapts to
+  // how evenly snapshots arrive, between these bounds (seconds).
+  interpMin: 0.05,
+  interpMax: 0.3,
+  statsEvery: 0.25,    // kills, deaths and damage change slowly: this many seconds apart
   codeChars: 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789',
   modes: ['tdm', 'koth', 'ctf', 'oneshot', 'escort', 'hardcore', 'br', 'jug'],
 };
@@ -53,8 +65,12 @@ class NetPeer {
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') this.fallback();
     };
+    // Two channels: 'battle' is fire-and-forget for snapshots and inputs (a late
+    // one is useless, the next is already coming); 'ctl' is reliable and ordered
+    // for the messages that must arrive (match start, lobby, upgrade picks).
     if (this.initiator) {
       this.bind(pc.createDataChannel('battle', { ordered: false, maxRetransmits: 0 }));
+      this.bind(pc.createDataChannel('ctl', { ordered: true }));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       this.net.sig({ t: 'offer', to: this.id, sdp: pc.localDescription.sdp });
@@ -66,14 +82,20 @@ class NetPeer {
   }
 
   bind(dc) {
-    this.dc = dc;
+    const ctl = dc.label === 'ctl';
+    if (ctl) this.ctl = dc; else this.dc = dc;
+    dc.binaryType = 'arraybuffer';
     dc.onopen = () => {
+      if (ctl) this.ctlOpen = true; else this.open = true;
+      if (!this.open || !this.ctlOpen || this.mode === 'p2p') return;
       clearTimeout(this.fallbackT);
-      this.open = true;
       this.mode = 'p2p';
       this.net.onPeerUp(this);
     };
-    dc.onclose = () => { this.open = false; if (this.mode === 'p2p') this.fallback(); };
+    dc.onclose = () => {
+      if (ctl) this.ctlOpen = false; else this.open = false;
+      if (this.mode === 'p2p' && !this.open) this.fallback();
+    };
     dc.onmessage = e => this.net.onPeerMessage(this, e.data);
   }
 
@@ -104,17 +126,25 @@ class NetPeer {
     }
   }
 
-  send(obj) { this.sendRaw(JSON.stringify(obj)); }
+  send(obj) { this.sendRaw(JSON.stringify(obj), !NET_UNRELIABLE.has(obj.t)); }
 
-  sendRaw(s) {
+  sendRaw(s, reliable) {
+    if (reliable && this.ctlOpen) { try { this.ctl.send(s); return; } catch (e) { /* try the battle channel */ } }
     if (this.open) { try { this.dc.send(s); return; } catch (e) { /* fall through to relay */ } }
     if (this.mode !== 'gone') this.net.sig({ t: 'data', to: this.id, d: s });
+  }
+
+  // Binary world snapshots: straight down the battle channel, or base64 through the relay.
+  sendBin(buf) {
+    if (this.open) { try { this.dc.send(buf); return; } catch (e) { /* fall through to relay */ } }
+    if (this.mode !== 'gone') this.net.sig({ t: 'data', to: this.id, b: bufToB64(buf) });
   }
 
   close() {
     this.mode = 'gone';
     clearTimeout(this.fallbackT);
     try { if (this.dc) this.dc.close(); } catch (e) {}
+    try { if (this.ctl) this.ctl.close(); } catch (e) {}
     try { if (this.pc) this.pc.close(); } catch (e) {}
   }
 }
@@ -138,6 +168,35 @@ class Net {
     this.pendingEv = [];       // host: effects waiting for the next snapshot
     this.evQueue = [];         // joiner: effects waiting for the clock to reach them
     this.lobby = { mode: 'tdm', size: 2, hits: 7, biome: 'random', difficulty: 'normal', fill: true };
+    this.resetMatch();
+  }
+
+  // Per-match state on both sides: input sequencing, the joiner's prediction
+  // history and its measure of how evenly snapshots arrive.
+  resetMatch() {
+    this.snapBuf.length = 0;
+    this.playT = undefined;
+    this.inputT = 0;
+    this.inKey = '';
+    this.inRepeat = 0;
+    this.inGap = 0;
+    this.spCount = 0;          // joiner: special presses so far (a lost packet can't eat one or repeat one)
+    this.sentAt = new Map();   // joiner: input seq -> when it was sent
+    this.hist = [];            // joiner: own tank's predicted pose each frame { at, x, y, a }
+    this.corr = { x: 0, y: 0, a: 0 };   // joiner: correction still to blend in
+    this.predReload = 0;       // joiner: local guess at the gun's reload, for instant muzzle flashes
+    this.treads = new Map();   // joiner: tank index -> unwrapped tread distance
+    this.lastRows = new Map(); // joiner: tank index -> last full snapshot row (wrecks send a stub)
+    this.evSeen = new Set();   // joiner: ids of important events already played
+    this.evSeq = 0;            // host: ids for important events
+    this.evAgain = [];         // host: important events to repeat in the next snapshot
+    this.lastArrive = 0;
+    this.gapAvg = 1 / NET.snapHz;
+    this.gapDev = 0.01;
+    this.interp = 0.1;
+    this.statT = 0;
+    this.corrections = 0;      // diagnostics: how often and how far the host overruled us
+    this.corrDist = 0;
   }
 
   get isHost() { return this.role === 'host'; }
@@ -285,7 +344,7 @@ class Net {
     }
     const peer = this.peers.get(m.from);
     if (!peer) return;
-    if (m.t === 'data') { this.onPeerMessage(peer, m.d); return; }
+    if (m.t === 'data') { this.onPeerMessage(peer, m.b ? b64ToBuf(m.b) : m.d); return; }
     if (m.t === 'bye') { this.dropPeer(peer, 'left'); return; }
     await peer.handleSignal(m).catch(() => {});
   }
@@ -412,10 +471,22 @@ class Net {
 
   // ---- messages between peers -----------------------------------------------------------
   onPeerMessage(peer, raw) {
+    peer.lastSeen = performance.now();
+    if (typeof raw !== 'string') {
+      // Binary is always a world snapshot from the host.
+      if (this.isClient && this.app.game) {
+        let m;
+        try { m = this.unpackSnapshot(raw, this.app.game); } catch (e) { return; }
+        this.onSnapshot(m);
+      }
+      return;
+    }
     let m;
     try { m = JSON.parse(raw); } catch (e) { return; }
-    peer.lastSeen = performance.now();
     switch (m.t) {
+      case 'st':
+        if (this.isClient) this.applyStats(m.st);
+        break;
       case 'name':
         peer.name = (m.name || 'Player').slice(0, 14);
         peer.loadout = m.loadout || null;
@@ -432,14 +503,10 @@ class Net {
         break;
       case 'start':
         this.state = 'playing';
-        this.snapBuf.length = 0;
         this.app.startOnline(m.s, 'client');
         break;
       case 'in':
         if (this.isHost) this.applyRemoteInput(peer, m);
-        break;
-      case 's':
-        if (this.isClient) this.onSnapshot(m);
         break;
       case 'ping':
         peer.send({ t: 'pong', at: m.at });
@@ -467,22 +534,27 @@ class Net {
 
   everyPeer(msg) {
     if (this.peers.size < 2) { for (const p of this.peers.values()) p.send(msg); return; }
-    const s = JSON.stringify(msg);
-    for (const p of this.peers.values()) p.sendRaw(s);
+    const s = JSON.stringify(msg), reliable = !NET_UNRELIABLE.has(msg.t);
+    for (const p of this.peers.values()) p.sendRaw(s, reliable);
   }
 
   // ---- host: read remote inputs, publish the world ---------------------------------------
   applyRemoteInput(peer, m) {
     const t = peer.tank;
-    if (!t || !t.alive) return;
-    if (m.q <= (peer.lastSeq || -1)) return;   // stale packet, the newer one wins
+    if (peer.lastSeq !== undefined && m.q <= peer.lastSeq) return;   // stale packet, the newer one wins
     peer.lastSeq = m.q;
+    peer.seqAt = performance.now();
     const d = m.d;
+    // The special is a press count, not a flag: a lost packet can't swallow a
+    // press and a repeated one can't fire it twice.
+    const sp = d[7] | 0, pressed = sp !== (peer.spSeen | 0);
+    peer.spSeen = sp;
+    if (!t || !t.alive) return;
     t.input.throttle = d[0] / 100;
     t.input.turn = d[1] / 100;
     t.input.aim = d[2] / 1000;
     t.input.fire = !!(d[3] & 1);
-    if (d[3] & 2) {
+    if (pressed) {
       t.input.missile = true;
       t.input.missileTarget = d[6] >= 0 ? this.app.game.tanks[d[6]] : null;
       t.input.specialPoint = d[4] !== undefined && d[4] !== null ? { x: d[4], y: d[5] } : null;
@@ -504,43 +576,161 @@ class Net {
       }
     }
     this.sendT -= dt;
+    this.statT -= dt;
     const fastest = [...this.peers.values()].every(p => p.mode === 'p2p');
     if (this.sendT > 0) return;
-    const busy = game.tanks.length > 16 ? 0.7 : 1;
-    this.sendT = 1 / ((fastest ? NET.snapHz : NET.relaySnapHz) * busy);
+    // Snapshots are binary and a 10v10 one fits in a single packet, so even
+    // big battles keep the full rate; only the 40-tank royale eases off.
+    const busy = game.tanks.length > 24 ? 0.75 : 1;
+    const hz = (fastest ? NET.snapHz : NET.relaySnapHz) * busy;
+    // Carry the remainder so the rate holds at any frame rate (a 60 fps host
+    // would otherwise round every 1/30 s wait up to three frames).
+    this.sendT = Math.max(this.sendT + 1 / hz, 0);
     const snap = this.packSnapshot(game);
-    this.everyPeer(snap);
+    for (const p of this.peers.values()) p.sendBin(snap);
+    // Kills, deaths and damage change slowly: a few times a second, on their own.
+    if (this.statT <= 0) {
+      this.statT = NET.statsEvery;
+      this.everyPeer({ t: 'st', st: this.packStats(game) });
+    }
     this.pingT = (this.pingT || 0) - 1;
     if (this.pingT <= 0) { this.pingT = NET.snapHz * 2; this.everyPeer({ t: 'ping', at: performance.now() }); }
   }
 
+  packStats(g) {
+    return g.tanks.map(t => [t.stats.kills | 0, t.stats.deaths | 0, Math.round(t.stats.damage || 0), t.stats.shots | 0, t.stats.hits | 0,
+      Math.round(t.stats.convoy || 0), Math.round(t.score || 0), t.level || 1, Math.round(t.stats.xp || 0), Math.round(t.maxHp), t.grenadeAmmo | 0]);
+  }
+
+  applyStats(st) {
+    const gm = this.app.game;
+    if (!gm || !st) return;
+    st.forEach((r, i) => {
+      const t = gm.tanks[i];
+      if (!t) return;
+      t.stats.kills = r[0]; t.stats.deaths = r[1]; t.stats.damage = r[2];
+      t.stats.shots = r[3]; t.stats.hits = r[4]; t.stats.convoy = r[5];
+      t.score = r[6]; t.level = r[7]; t.stats.xp = r[8]; t.maxHp = r[9]; t.grenadeAmmo = r[10];
+    });
+  }
+
+  // The world as a compact binary packet (see SNAP_* below for the layout): a
+  // 10v10 battle is about 0.8 KB, one network packet, where the JSON it replaced
+  // was 1.5-2.5 KB and split across two or three. On a channel that never
+  // resends, one lost piece used to lose the whole snapshot.
   packSnapshot(g) {
-    const tk = [];
+    const w = this.writer || (this.writer = new ByteWriter(2048));
+    w.reset();
+    w.u8(SNAP_MAGIC);
+    w.f64(g.time);
+    w.u16(g.tanks.length);
     for (const t of g.tanks) {
-      tk.push([t.netIdx, Math.round(t.x), Math.round(t.y), Math.round(t.angle * 100), Math.round(t.turret * 100),
-        Math.round(t.hp),
-        (t.alive ? 1 : 0) | (t.input.fire ? 2 : 0) | (t.boostT > 0 ? 4 : 0) | (t.burnT > 0 ? 8 : 0) | (t.repairing ? 16 : 0) | (t.jug ? 32 : 0)
-          | (t.shield > 0 ? 64 : 0) | (t.invuln > 0 ? 128 : 0) | (t.flakT > 0 ? 256 : 0) | (t.repairT > 0 ? 512 : 0) | (t.overheatT > 0 ? 1024 : 0),
-        Math.round(t.treadL), Math.round(t.treadR), Math.round(t.missileCharge),
-        Math.round(t.reload * 100), Math.round(t.heat || 0), Math.round((t.flakAngle || 0) * 100)]);
+      // A wreck only needs its armor and special charge (both shown on its HUD): five bytes.
+      if (!t.alive) { w.u8(t.netIdx | 0x80); w.u16(t.hp); w.u16(t.missileCharge); continue; }
+      w.u8(t.netIdx);
+      w.i16(t.x); w.i16(t.y);
+      w.i16(angNorm(t.angle) * 1000); w.i16(angNorm(t.turret) * 1000);
+      w.u16(t.hp);
+      w.u16((t.alive ? 1 : 0) | (t.input.fire ? 2 : 0) | (t.boostT > 0 ? 4 : 0) | (t.burnT > 0 ? 8 : 0) | (t.repairing ? 16 : 0) | (t.jug ? 32 : 0)
+        | (t.shield > 0 ? 64 : 0) | (t.invuln > 0 ? 128 : 0) | (t.flakT > 0 ? 256 : 0) | (t.repairT > 0 ? 512 : 0) | (t.overheatT > 0 ? 1024 : 0));
+      // Tread distance only ever moves a little between snapshots: 16 bits,
+      // unwrapped against the last value on the far side.
+      w.u16(Math.round(t.treadL) & 0xffff); w.u16(Math.round(t.treadR) & 0xffff);
+      w.u16(t.missileCharge);
+      w.u16(t.reload * 100);
+      w.u8(t.heat || 0);
+      w.i16(angNorm(t.flakAngle || 0) * 1000);
     }
-    const id = o => o.nid || (o.nid = ++this.oid);
-    const sh = g.shells.map(x => [id(x), Math.round(x.x), Math.round(x.y), SHELL_NET.indexOf(x.kind), Math.round(x.speed), 0, Math.round(x.angle * 100)]);
-    const ms = g.missiles.map(x => [id(x), Math.round(x.x), Math.round(x.y), MISSILE_NET.indexOf(x.kind), x.owner ? x.owner.netIdx : -1, Math.round((x.blink || 0) * 100), Math.round(x.angle * 100)]);
-    const gr = g.grenades.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.spin * 100), Math.round(x.fuse * 100)]);
-    const mi = g.mines.map(x => [id(x), Math.round(x.x), Math.round(x.y), x.team, x.arm > 0 ? 1 : 0, Math.round(x.blink * 100)]);
-    const sm = g.smokes.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.r), Math.round(x.life * 100), x.seed]);
-    const ar = g.artillery.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.h), Math.round(x.tx), Math.round(x.ty), Math.round(x.k * 100), Math.round(x.sx), Math.round(x.sy)]);
-    const as = g.airstrikes.map(x => [id(x), Math.round(x.x), Math.round(x.y), Math.round(x.a * 100), Math.round(x.t * 100), x.along === undefined ? 0 : Math.round(x.along), x.owner ? x.owner.netIdx : -1]);
-    const snap = { t: 's', k: g.time, tk, sh, ms, gr, mi, sm, ar, as, ob: this.packObjective(g), ev: this.pendingEv.splice(0) };
-    // Kills, deaths and damage change slowly: send them a few times a second.
-    this.statT = (this.statT || 0) - 1;
-    if (this.statT <= 0) {
-      this.statT = 4;
-      snap.st = g.tanks.map(t => [t.stats.kills | 0, t.stats.deaths | 0, Math.round(t.stats.damage || 0), t.stats.shots | 0, t.stats.hits | 0,
-        Math.round(t.stats.convoy || 0), Math.round(t.score || 0), t.level || 1, Math.round(t.stats.xp || 0), Math.round(t.maxHp), t.grenadeAmmo | 0]);
+    const id = o => (o.nid || (o.nid = ++this.oid)) & 0xffff;
+    w.u16(g.shells.length);
+    for (const x of g.shells) { w.u16(id(x)); w.i16(x.x); w.i16(x.y); w.u8(SHELL_NET.indexOf(x.kind)); w.u16(x.speed); w.i16(angNorm(x.angle) * 1000); }
+    w.u16(g.missiles.length);
+    for (const x of g.missiles) { w.u16(id(x)); w.i16(x.x); w.i16(x.y); w.u8(MISSILE_NET.indexOf(x.kind)); w.i8(x.owner ? x.owner.netIdx : -1); w.u8((x.blink || 0) * 100); w.i16(angNorm(x.angle) * 1000); }
+    w.u16(g.grenades.length);
+    for (const x of g.grenades) { w.u16(id(x)); w.i16(x.x); w.i16(x.y); w.i16(angNorm(x.spin) * 1000); w.u16(Math.max(0, x.fuse) * 100); }
+    w.u16(g.mines.length);
+    for (const x of g.mines) { w.u16(id(x)); w.i16(x.x); w.i16(x.y); w.i8(x.team); w.u8(x.arm > 0 ? 1 : 0); w.u8(x.blink * 100); }
+    w.u16(g.smokes.length);
+    for (const x of g.smokes) { w.u16(id(x)); w.i16(x.x); w.i16(x.y); w.u16(x.r); w.u16(Math.max(0, x.life) * 100); w.u32(x.seed); }
+    w.u16(g.artillery.length);
+    for (const x of g.artillery) { w.u16(id(x)); w.i16(x.x); w.i16(x.y); w.i16(x.h); w.i16(x.tx); w.i16(x.ty); w.u16(x.k * 100); w.i16(x.sx); w.i16(x.sy); }
+    w.u16(g.airstrikes.length);
+    for (const x of g.airstrikes) { w.u16(id(x)); w.i16(x.x); w.i16(x.y); w.i16(angNorm(x.a) * 1000); w.u16(x.t * 100); w.i16(x.along === undefined ? 0 : x.along); w.i8(x.owner ? x.owner.netIdx : -1); }
+    // Each joiner's latest input the host has applied, and how long ago it
+    // arrived: lets the joiner line the host's answer up with its own past.
+    const now = performance.now(), acks = [];
+    for (const p of this.peers.values()) if (p.tank && p.lastSeq >= 0) acks.push(p);
+    w.u8(acks.length);
+    for (const p of acks) { w.u8(p.tank.netIdx); w.u32(p.lastSeq); w.u16(now - p.seqAt); }
+    // Objective state and effects vary in shape: a short JSON tail.
+    // Kills, captures and round changes ride twice (see NET_KEY_EVENTS), so one
+    // lost packet can't drop them; the joiner keeps the first copy it sees.
+    const tail = { ob: this.packObjective(g) };
+    const fresh = this.pendingEv.splice(0), ev = this.evAgain.length ? this.evAgain.concat(fresh) : fresh;
+    this.evAgain = fresh.filter(e => e.n !== undefined);
+    if (ev.length) tail.ev = ev;
+    w.str(JSON.stringify(tail));
+    return w.done();
+  }
+
+  // Back into the row arrays the playback code works with (angles in
+  // hundredths of a radian, as the JSON snapshots used to carry them).
+  unpackSnapshot(buf, g) {
+    const r = new ByteReader(buf);
+    if (r.u8() !== SNAP_MAGIC) throw new Error('not a snapshot');
+    const m = { t: 's', k: r.f64() };
+    const tk = m.tk = [];
+    const last = this.lastRows || (this.lastRows = new Map());
+    for (let n = r.u16(); n > 0; n--) {
+      const b0 = r.u8(), idx = b0 & 0x7f;
+      if (b0 & 0x80) {
+        // Destroyed: where it last stood, not alive, holding its armor and charge.
+        const p = last.get(idx), hp = r.u16(), mc = r.u16();
+        const t = g.tanks[idx];
+        tk.push(p ? [idx, p[1], p[2], p[3], p[4], hp, 0, p[7], p[8], mc, 0, 0, p[12]]
+          : [idx, t ? t.x : 0, t ? t.y : 0, t ? t.angle * 100 : 0, t ? t.turret * 100 : 0, hp, 0, 0, 0, mc, 0, 0, 0]);
+        continue;
+      }
+      const x = r.i16(), y = r.i16(), a = r.i16() / 10, tu = r.i16() / 10, hp = r.u16(), fl = r.u16();
+      const tl = this.unwrapTread(idx * 2, r.u16()), tr = this.unwrapTread(idx * 2 + 1, r.u16());
+      const row = [idx, x, y, a, tu, hp, fl, tl, tr, r.u16(), r.u16(), r.u8(), r.i16() / 10];
+      last.set(idx, row);
+      tk.push(row);
     }
-    return snap;
+    m.sh = [];
+    for (let n = r.u16(); n > 0; n--) { const id = r.u16(), x = r.i16(), y = r.i16(), k = r.u8(), sp = r.u16(); m.sh.push([id, x, y, k, sp, 0, r.i16() / 10]); }
+    m.ms = [];
+    for (let n = r.u16(); n > 0; n--) m.ms.push([r.u16(), r.i16(), r.i16(), r.u8(), r.i8(), r.u8(), r.i16() / 10]);
+    m.gr = [];
+    for (let n = r.u16(); n > 0; n--) m.gr.push([r.u16(), r.i16(), r.i16(), r.i16() / 10, r.u16()]);
+    m.mi = [];
+    for (let n = r.u16(); n > 0; n--) m.mi.push([r.u16(), r.i16(), r.i16(), r.i8(), r.u8(), r.u8()]);
+    m.sm = [];
+    for (let n = r.u16(); n > 0; n--) m.sm.push([r.u16(), r.i16(), r.i16(), r.u16(), r.u16(), r.u32()]);
+    m.ar = [];
+    for (let n = r.u16(); n > 0; n--) m.ar.push([r.u16(), r.i16(), r.i16(), r.i16(), r.i16(), r.i16(), r.u16(), r.i16(), r.i16()]);
+    m.as = [];
+    for (let n = r.u16(); n > 0; n--) m.as.push([r.u16(), r.i16(), r.i16(), r.i16() / 10, r.u16(), r.i16(), r.i8()]);
+    m.ak = [];
+    for (let n = r.u8(); n > 0; n--) m.ak.push([r.u8(), r.u32(), r.u16()]);
+    const tail = JSON.parse(r.str());
+    m.ob = tail.ob;
+    m.ev = tail.ev || [];
+    return m;
+  }
+
+  // A 16-bit tread reading back to the full distance: take the step from the
+  // last reading that is under half the 16-bit range.
+  unwrapTread(key, v) {
+    const prev = this.treads.get(key);
+    let full = v;
+    if (prev !== undefined) {
+      let d = v - (((prev % 65536) + 65536) % 65536);
+      if (d > 32767) d -= 65536; else if (d < -32768) d += 65536;
+      full = prev + d;
+    }
+    this.treads.set(key, full);
+    return full;
   }
 
   packObjective(g) {
@@ -562,7 +752,10 @@ class Net {
   collectEvents(g) {
     if (!this.isHost || this.state !== 'playing' || !g.events.length) return;
     const out = this.pendingEv;
-    for (const e of this.packEvents(g)) out.push(e);
+    for (const e of this.packEvents(g)) {
+      if (NET_KEY_EVENTS.has(e.type)) e.n = ++this.evSeq;
+      out.push(e);
+    }
     if (out.length > 500) out.splice(0, out.length - 500);
   }
 
@@ -586,41 +779,62 @@ class Net {
   }
 
   // ---- client: send input, apply snapshots ------------------------------------------------
+  // Controls go out the moment they change (up to NET.inputHz), a few frames
+  // running after a change in case one is lost, and otherwise now and then.
+  // Waiting for a fixed 30 Hz tick used to add up to 33 ms before the host
+  // even heard about a key press.
   clientInput(dt, tank, game) {
-    this.inputT -= dt;
-    if (this.inputT > 0 || !tank) return;
-    this.inputT = 1 / NET.inputHz;
+    if (!tank) return;
     const inp = tank.input;
-    const target = inp.missileTarget ? game.tanks.indexOf(inp.missileTarget) : -1;
-    const pt = inp.specialPoint;
-    this.everyPeer({ t: 'in', q: ++this.seq, d: [
+    // A special press is counted here and cleared, as the host's own step would.
+    if (inp.missile) {
+      this.spCount = (this.spCount + 1) & 255;
+      this.spTarget = inp.missileTarget ? game.tanks.indexOf(inp.missileTarget) : -1;
+      this.spPoint = inp.specialPoint ? { x: Math.round(inp.specialPoint.x), y: Math.round(inp.specialPoint.y) } : null;
+      inp.missile = false;
+      inp.specialPoint = null;
+    }
+    const pt = this.spPoint;
+    const d = [
       Math.round(inp.throttle * 100), Math.round(inp.turn * 100), Math.round(inp.aim * 1000),
-      (inp.fire ? 1 : 0) | (inp.missile ? 2 : 0),
-      pt ? Math.round(pt.x) : null, pt ? Math.round(pt.y) : null, target,
-    ] });
+      inp.fire ? 1 : 0, pt ? pt.x : null, pt ? pt.y : null, this.spCount ? this.spTarget : -1, this.spCount,
+    ];
+    const key = d.join(',');
+    if (key !== this.inKey) { this.inKey = key; this.inRepeat = 3; }
+    this.inputT -= dt;
+    this.inGap -= dt;
+    const relay = !this.hostPeer() || !this.hostPeer().open;
+    if (this.inGap > 0 || (this.inRepeat <= 0 && this.inputT > 0)) return;
+    this.inRepeat--;
+    this.inputT = NET.inputIdle;
+    this.inGap = 1 / (relay ? NET.relayInputHz : NET.inputHz) - 0.002;
+    const q = ++this.seq, now = performance.now();
+    this.sentAt.set(q, now);
+    if (this.sentAt.size > 240) for (const k of this.sentAt.keys()) { if (this.sentAt.size <= 180) break; this.sentAt.delete(k); }
+    this.everyPeer({ t: 'in', q, d });
   }
 
+  hostPeer() { return this.peers.get(this.hostId); }
+
   onSnapshot(m) {
-    this.lastSnap = performance.now();
-    m.at = performance.now();
-    const gm = this.app.game;
-    if (m.st && gm) {
-      m.st.forEach((r, i) => {
-        const t = gm.tanks[i];
-        if (!t) return;
-        t.stats.kills = r[0]; t.stats.deaths = r[1]; t.stats.damage = r[2];
-        t.stats.shots = r[3]; t.stats.hits = r[4]; t.stats.convoy = r[5];
-        t.score = r[6]; t.level = r[7]; t.stats.xp = r[8]; t.maxHp = r[9]; t.grenadeAmmo = r[10];
-      });
-    }
-    const buf = this.snapBuf;
-    if (buf.length && m.k < buf[buf.length - 1].k) return;   // a late packet would rewind the world
-    buf.push(m);
-    if (buf.length > 12) buf.shift();
+    const now = performance.now();
+    this.lastSnap = now;
+    m.at = now;
     const g = this.app.game;
     if (!g) return;
-    // Events replay straight away: sounds and effects shouldn't wait for interpolation.
+    // How evenly do snapshots arrive? The playback delay follows: just enough
+    // to always have the next one in hand, instead of a fixed tenth of a second.
+    if (this.lastArrive) {
+      const gap = Math.min(0.5, (now - this.lastArrive) / 1000);
+      this.gapAvg += (gap - this.gapAvg) * 0.08;
+      this.gapDev += (Math.abs(gap - this.gapAvg) - this.gapDev) * 0.08;
+      this.interp = clamp(this.gapAvg * 1.5 + this.gapDev * 3 + 0.008, NET.interpMin, NET.interpMax);
+    }
+    this.lastArrive = now;
+    // Events replay on the host's clock, in step with the world they belong to.
+    // Important ones ride in two snapshots in a row; keep the first copy.
     for (const e of m.ev) {
+      if (e.n !== undefined) { if (this.evSeen.has(e.n)) continue; this.evSeen.add(e.n); }
       const ev = {};
       for (const k in e) {
         const v = e[k];
@@ -630,7 +844,87 @@ class Net {
       if (ev.__drop) continue;
       this.evQueue.push({ k: m.k, ev });
     }
+    if (this.evSeen.size > 600) { const keep = [...this.evSeen].slice(-300); this.evSeen = new Set(keep); }
     if (this.evQueue.length > 400) this.evQueue.splice(0, this.evQueue.length - 400);
+    this.checkPrediction(m, g);
+    const buf = this.snapBuf;
+    if (buf.length && m.k < buf[buf.length - 1].k) return;   // a late packet would rewind the world
+    buf.push(m);
+    if (buf.length > 12) buf.shift();
+  }
+
+  // ---- joiner: our own tank ------------------------------------------------------------
+  // It runs the real movement code locally so steering is instant. When a
+  // snapshot lands, compare the host's version with where *we* were at the
+  // matching moment (the input the host last applied, plus how long it has
+  // been running): only a real disagreement (a shove, a collision) gets
+  // corrected, and that correction is blended in over a few frames. The old
+  // way compared against where we are now, so the host's view, a round trip
+  // stale, kept dragging the tank back and swallowed the prediction.
+  checkPrediction(m, g) {
+    const t = g.locals[0];
+    if (!t || !t.alive || !m.ak) return;
+    const ack = m.ak.find(a => a[0] === t.netIdx), row = m.tk.find(r => r[0] === t.netIdx);
+    if (!ack || !row || !(row[6] & 1)) return;
+    const sent = this.sentAt.get(ack[1]);
+    const H = this.hist;
+    if (sent === undefined || H.length < 2) return;
+    const when = sent + ack[2];
+    // Our predicted pose at that moment.
+    let i = H.length - 1;
+    while (i > 0 && H[i - 1].at > when) i--;
+    const a = H[Math.max(0, i - 1)], b = H[i];
+    if (when < a.at - 50 || when > b.at + 100) return;   // outside what we remember
+    const f = b.at > a.at ? clamp((when - a.at) / (b.at - a.at), 0, 1) : 1;
+    const px = lerp(a.x, b.x, f), py = lerp(a.y, b.y, f), pa = lerpAngle(a.a, b.a, f);
+    const ex = row[1] - px, ey = row[2] - py, ea = angDiff(pa, row[3] / 100);
+    const e = Math.hypot(ex, ey);
+    // Snapshot positions are whole pixels: ignore rounding.
+    if (e < 1.5 && Math.abs(ea) < 0.02) return;
+    this.corrections++;
+    this.corrDist += e;
+    if (e > 120) {
+      // Far out (respawn, a big shove): take the host's word right away.
+      t.x += ex; t.y += ey; t.angle = angNorm(t.angle + ea);
+      this.corr.x = 0; this.corr.y = 0; this.corr.a = 0;
+      this.hist.length = 0;
+      return;
+    }
+    this.corr.x += ex; this.corr.y += ey; this.corr.a += ea;
+    // Everything we predicted after that moment was off by the same amount.
+    for (let k = i; k < H.length; k++) if (H[k].at >= when) { H[k].x += ex; H[k].y += ey; H[k].a += ea; }
+  }
+
+  // After the local movement step: blend in any correction, remember the pose,
+  // and give our own shots their flash and bang without the round trip.
+  afterPredict(dt, t, g, canDrive) {
+    if (!t) return;
+    if (!t.alive) { this.hist.length = 0; this.corr.x = this.corr.y = this.corr.a = 0; this.predReload = 0; return; }
+    const c = this.corr, k = 1 - Math.exp(-12 * dt);
+    const dx = c.x * k, dy = c.y * k, da = c.a * k;
+    t.x += dx; t.y += dy; t.angle = angNorm(t.angle + da);
+    c.x -= dx; c.y -= dy; c.a -= da;
+    const now = performance.now();
+    this.hist.push({ at: now, x: t.x + c.x, y: t.y + c.y, a: t.angle + c.a });
+    while (this.hist.length > 2 && now - this.hist[0].at > 1500) this.hist.shift();
+    this.predictShot(dt, t, g, canDrive);
+  }
+
+  // The host decides what a shot hits; the muzzle flash, recoil and sound are
+  // ours to show at once. The host's echo of our own shot is skipped.
+  predictShot(dt, t, g, canDrive) {
+    this.predReload = Math.max(0, this.predReload - dt);
+    const w = t.loadout.weapon;
+    if (!canDrive || !t.input.fire || this.predReload > 0 || t.overheatT > 0 || g.phase !== 'live') return;
+    if (w === 'wire' && g.missiles.some(m => m.wire && m.owner === t)) return;
+    this.predReload = t.reloadTime;
+    t.recoil = 1;
+    const a = t.turret, ca = Math.cos(a), sa = Math.sin(a), L = TANK.barrelLength * t.scale, s = t.scale;
+    const muzzles = w === 'double' ? [[t.x + ca * L - sa * 5.5 * s, t.y + sa * L + ca * 5.5 * s, a], [t.x + ca * L + sa * 5.5 * s, t.y + sa * L - ca * 5.5 * s, a]]
+      : w === 'twin' ? [[t.x + ca * L, t.y + sa * L, a], [t.x - ca * L * 0.92, t.y - sa * L * 0.92, a + Math.PI]]
+      : w === 'longgun' ? [[t.x + ca * L * 1.6, t.y + sa * L * 1.6, a]]
+      : [[t.x + ca * L, t.y + sa * L, a]];
+    g.events.push({ type: 'shot', x: muzzles[0][0], y: muzzles[0][1], angle: a, tank: t, weapon: w, muzzles, predicted: true });
   }
 
   // Play the match back on the host's clock, a fraction of a second behind the
@@ -647,7 +941,7 @@ class Net {
     }
     if (!buf.length) return;
     const newest = buf[buf.length - 1];
-    const target = newest.k - NET.interp;
+    const target = newest.k - this.interp;
     if (this.playT === undefined || this.playT > newest.k || this.playT < target - 0.6) this.playT = target;
     else {
       // Drift gently toward the target instead of jumping: a step early or late
@@ -656,9 +950,12 @@ class Net {
       this.playT += dt * clamp(1 + off * 2.5, 0.75, 1.35);
     }
     const t0 = this.playT;
+    const mine = g.locals[0];
     // Release the effects whose moment has arrived.
     while (this.evQueue.length && this.evQueue[0].k <= t0) {
       const ev = this.evQueue.shift().ev;
+      // Our own gun already flashed when we pulled the trigger (predictShot).
+      if (ev.type === 'shot' && ev.tank === mine && ev.weapon !== 'coaxmg') continue;
       // A few things the effects layer reads off the tank itself.
       if (ev.type === 'upgrade' && ev.tank && ev.slot) { ev.tank.loadout[ev.slot] = ev.id; ev.tank.recalc(g.baseHp); }
       if (ev.type === 'hit' && ev.target) ev.target.flash = 1;
@@ -671,7 +968,6 @@ class Net {
     const span = b.k - a.k;
     const f = span > 1e-4 ? clamp((t0 - a.k) / span, 0, 1) : 1;
     g.time = t0;
-    const mine = g.locals[0];
     // Recoil, hit flash and the respawn shimmer are set by events and normally
     // wound down by the physics step, which a joiner doesn't run.
     for (const t of g.tanks) {
@@ -686,15 +982,19 @@ class Net {
       const t = g.tanks[row[0]];
       if (!t) continue;
       const p = prev.get(row[0]) || row;
+      const own = t === mine;
       const px = lerp(p[1], row[1], f), py = lerp(p[2], row[2], f);
       const pa = lerpAngle(p[3] / 100, row[3] / 100, f), pt = lerpAngle(p[4] / 100, row[4] / 100, f);
-      t.vx = span > 1e-4 ? (row[1] - p[1]) / span : 0;
-      t.vy = span > 1e-4 ? (row[2] - p[2]) / span : 0;
+      if (!own) {
+        t.vx = span > 1e-4 ? (row[1] - p[1]) / span : 0;
+        t.vy = span > 1e-4 ? (row[2] - p[2]) / span : 0;
+      }
       t.hp = row[5];
       const flags = row[6];
       const wasAlive = t.alive;
       t.alive = !!(flags & 1);
-      t.input.fire = !!(flags & 2);
+      // Our own trigger is our own: the host's copy is a round trip old.
+      if (!own) t.input.fire = !!(flags & 2);
       t.boostT = (flags & 4) ? 1 : 0;
       t.burnT = (flags & 8) ? 1 : 0;
       t.repairing = !!(flags & 16);
@@ -707,13 +1007,15 @@ class Net {
       t.reload = row[10] / 100;
       t.heat = row[11];
       t.flakAngle = row[12] / 100;
-      t.treadL = lerp(p[7], row[7], f); t.treadR = lerp(p[8], row[8], f);
+      if (!own) { t.treadL = lerp(p[7], row[7], f); t.treadR = lerp(p[8], row[8], f); }
       t.missileCharge = row[9];
       const wasJug = t.jug;
       t.jug = !!(flags & 32);
       if (t.jug !== wasJug) { t.jugHpMul = t.maxHp / Math.max(1, g.baseHp); t.recalc(g.baseHp); }
-      if (!wasAlive && t.alive) { t.x = px; t.y = py; t.angle = pa; }   // respawned: no sliding in from the grave
-      if (t === mine && t.alive) { this.reconcile(dt, t, newest); continue; }
+      // Respawned: straight to the spawn point, no sliding in from the grave.
+      if (!wasAlive && t.alive) { t.x = row[1]; t.y = row[2]; t.angle = row[3] / 100; t.turret = row[4] / 100; t.speed = 0; }
+      // Our own tank drives itself (App.predictLocal) and is corrected in checkPrediction.
+      if (own && t.alive) continue;
       t.x = px; t.y = py; t.angle = pa; t.turret = pt;
       t.speed = Math.hypot(t.vx, t.vy);
     }
@@ -801,21 +1103,6 @@ class Net {
     for (const t of g.tanks) t.carrying = null;
     if (o.f && m instanceof CTFMode) for (const f of m.flags) if (f.carrier) f.carrier.carrying = f;
   }
-
-  // Our own tank is simulated locally so steering feels instant; nudge it back
-  // toward the host's version instead of snapping.
-  reconcile(dt, t, newest) {
-    const row = newest.tk.find(r => r[0] === t.netIdx);
-    if (!row) return;
-    const x = row[1], y = row[2], a = row[3] / 100;
-    const d = dist(t.x, t.y, x, y);
-    if (d > 110) { t.x = x; t.y = y; t.angle = a; return; }   // too far out: take the host's word
-    if (d < 6) return;                                        // close enough: leave it alone
-    const k = 1 - Math.exp(-5 * dt);
-    t.x = lerp(t.x, x, k);
-    t.y = lerp(t.y, y, k);
-    t.angle = lerpAngle(t.angle, a, 1 - Math.exp(-3 * dt));
-  }
 }
 
 // Shell and missile kinds, by index, so snapshots stay small.
@@ -823,4 +1110,66 @@ const SHELL_NET = ['shell', 'bullet', 'flame', 'long', 'hesh', 'coax'];
 const MISSILE_NET = ['missile', 'rocket', 'salvo', 'wire'];
 // Events that are either local-only or rebuilt from the snapshot itself.
 const NET_SKIP_EVENTS = new Set(['missile_ready']);
+// Events worth sending twice: missing one would leave the kill feed, score or
+// round state wrong rather than just skip a puff of smoke.
+const NET_KEY_EVENTS = new Set(['kill', 'announce', 'flag', 'hill', 'jug', 'round_end', 'round_start', 'escort_round', 'escort_end',
+  'match_over', 'upgrade', 'levelup', 'streak', 'respawn', 'go', 'zone']);
+// Messages that go on the fire-and-forget channel; everything else must arrive.
+const NET_UNRELIABLE = new Set(['in', 'ping', 'pong', 'st']);
+const SNAP_MAGIC = 0x53;   // first byte of a binary snapshot
+
+// Little-endian packing for snapshots. Numbers are rounded and clamped to the
+// field's range, so a stray value can't wrap into nonsense.
+class ByteWriter {
+  constructor(n) { this.buf = new ArrayBuffer(n); this.dv = new DataView(this.buf); this.o = 0; }
+  reset() { this.o = 0; }
+  need(n) {
+    if (this.o + n <= this.buf.byteLength) return;
+    const nb = new ArrayBuffer(Math.max(this.buf.byteLength * 2, this.o + n));
+    new Uint8Array(nb).set(new Uint8Array(this.buf, 0, this.o));
+    this.buf = nb; this.dv = new DataView(nb);
+  }
+  u8(v) { this.need(1); this.dv.setUint8(this.o, clamp(Math.round(v) || 0, 0, 255)); this.o += 1; }
+  i8(v) { this.need(1); this.dv.setInt8(this.o, clamp(Math.round(v) || 0, -128, 127)); this.o += 1; }
+  u16(v) { this.need(2); this.dv.setUint16(this.o, clamp(Math.round(v) || 0, 0, 65535), true); this.o += 2; }
+  i16(v) { this.need(2); this.dv.setInt16(this.o, clamp(Math.round(v) || 0, -32768, 32767), true); this.o += 2; }
+  u32(v) { this.need(4); this.dv.setUint32(this.o, Math.max(0, Math.round(v) || 0) >>> 0, true); this.o += 4; }
+  f64(v) { this.need(8); this.dv.setFloat64(this.o, v, true); this.o += 8; }
+  str(s) {
+    const b = (this.enc || (this.enc = new TextEncoder())).encode(s);
+    this.u16(b.length);
+    this.need(b.length);
+    new Uint8Array(this.buf, this.o, b.length).set(b);
+    this.o += b.length;
+  }
+  done() { return this.buf.slice(0, this.o); }
+}
+
+class ByteReader {
+  constructor(buf) { this.dv = new DataView(buf); this.buf = buf; this.o = 0; }
+  u8() { return this.dv.getUint8(this.o++); }
+  i8() { return this.dv.getInt8(this.o++); }
+  u16() { const v = this.dv.getUint16(this.o, true); this.o += 2; return v; }
+  i16() { const v = this.dv.getInt16(this.o, true); this.o += 2; return v; }
+  u32() { const v = this.dv.getUint32(this.o, true); this.o += 4; return v; }
+  f64() { const v = this.dv.getFloat64(this.o, true); this.o += 8; return v; }
+  str() {
+    const n = this.u16(), s = (ByteReader.dec || (ByteReader.dec = new TextDecoder())).decode(new Uint8Array(this.buf, this.o, n));
+    this.o += n;
+    return s;
+  }
+}
+
+// Binary through the Supabase relay, which only carries JSON.
+function bufToB64(buf) {
+  const b = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function b64ToBuf(s) {
+  const bin = atob(s), b = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+  return b.buffer;
+}
 const NET_REF_FIELDS = new Set(['tank', 'target', 'shooter', 'victim', 'killer', 'owner', 'missile', 'strike']);

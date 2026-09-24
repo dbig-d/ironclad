@@ -97,6 +97,7 @@ const App = {
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     this.mission = null;
     this.steering = this.ui.settings.steering;
+    this.net.resetMatch();
     const g = this.game = new Game(settings);
     const slots = settings.netSlots;
     const mySlot = Math.max(0, slots.findIndex(sl => sl.id === this.net.me));
@@ -107,6 +108,8 @@ const App = {
         const k = slots.findIndex(sl => sl.id === p.id);
         p.tank = k >= 0 ? g.players[k] : null;
         p.lastSeq = -1;
+        p.seqAt = 0;
+        p.spSeen = 0;
       }
     }
     this.renderer.setGame(g, [mine]);
@@ -122,6 +125,8 @@ const App = {
   // toward the host's version whenever a snapshot lands (see Net.reconcile).
   predictLocal(dt, t, g, canDrive) {
     if (!t || !t.alive || !canDrive) return;
+    // The countdown holds every tank still on the host: do the same here.
+    if (g.phase === 'intro') { t.input.throttle = 0; t.input.turn = 0; }
     const tire = PARTS.tires[t.loadout.tires];
     t.surfaceMul = g.map.onWater(t.x, t.y) ? tire.water : g.map.onRoad(t.x, t.y) ? tire.road : tire.off;
     t.move(dt);
@@ -339,12 +344,15 @@ const App = {
       this.net.clientInput(dt, humans[0], g);
       this.net.clientFrame(dt, g);
       this.predictLocal(dt, humans[0], g, canDrive);
+      this.net.afterPredict(dt, humans[0], g, canDrive);
       this.processEvents();
       r.fx.update(dt, g);
     } else if (simulate) {
       // Brief slow motion as the match ends.
       const simDt = dt * (g.phase === 'over' && g.overT < 0.8 ? 0.35 : 1);
-      const steps = Math.ceil(simDt / (1 / 60));
+      // A 60 Hz frame is never exactly 1/60 s: without the slack, every frame a
+      // hair over it would run the whole battle twice in half-steps.
+      const steps = Math.max(1, Math.ceil(simDt * 60 - 0.1));
       for (let i = 0; i < steps; i++) g.update(simDt / steps);
       if (this.net.isHost && playing) this.net.collectEvents(g);
       this.processEvents();

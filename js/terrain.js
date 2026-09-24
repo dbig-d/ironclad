@@ -22,6 +22,7 @@ class Terrain {
 
     this.paint();
     this.sprites = map.obstacles.map(o => obstacleSprite(o, this.biome));
+    for (const s of this.sprites) toBitmap(s.canvas, b => { s.canvas = b; });
   }
 
   paint() {

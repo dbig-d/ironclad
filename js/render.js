@@ -20,6 +20,84 @@ const AMB_HASH = (() => {
   return a;
 })();
 const LEAF_COLS = ['rgba(214,112,44,0.9)', 'rgba(190,72,38,0.9)', 'rgba(232,168,56,0.9)', 'rgba(160,62,36,0.85)'];
+const AMBIENT = {
+  snow: { n: 60, vx: 16, vy: 34, sway: 10 },
+  petals: { n: 30, vx: 34, vy: 20, sway: 14 },
+  dust: { n: 18, vx: 70, vy: 6, sway: 4 },
+  pollen: { n: 14, vx: 10, vy: -4, sway: 8 },
+  leaves: { n: 26, vx: 28, vy: 24, sway: 22 },
+  drizzle: { n: 110, vx: -60, vy: 520, sway: 0 },
+};
+const AMB_LEVELS = 4;   // opacity steps for snow and rain sprites (too fine to see)
+const AMB_SNOW_COLS = Array.from({ length: AMB_LEVELS }, (_, k) => `rgba(255,255,255,${(0.55 + (k + 0.5) / AMB_LEVELS * 0.4).toFixed(3)})`);
+const AMB_RAIN_COLS = Array.from({ length: AMB_LEVELS }, (_, k) => `rgba(200,215,225,${(0.18 + (k + 0.5) / AMB_LEVELS * 0.2).toFixed(3)})`);
+const AMB_RINGS = 12;   // size steps for rain ripples (under a pixel apart)
+const ambRingR = k => 2 + (k + 0.5) / AMB_RINGS * 7;
+// Weather particle sprites, drawn at 4x world scale so they stay sharp zoomed in.
+const AmbArt = {
+  cache: new Map(),
+  make(key, w, h, draw) {
+    let c = this.cache.get(key);
+    if (c) return c;
+    const S = 4;
+    c = makeCanvas(w * S, h * S);
+    const ctx = c.getContext('2d');
+    ctx.scale(S, S);
+    draw(ctx);
+    this.cache.set(key, c);
+    toBitmap(c, b => this.cache.set(key, b));
+    return c;
+  },
+  petal(k) {
+    return this.make('p' + k, 7.4, 4.4, ctx => {
+      ctx.fillStyle = k ? 'rgba(255,232,240,0.85)' : 'rgba(248,190,212,0.9)';
+      ctx.beginPath(); ctx.ellipse(3.7, 2.2, 3.2, 1.7, 0, 0, TAU); ctx.fill();
+    });
+  },
+  leaf(k) {
+    return this.make('l' + k, 8.2, 4.75, ctx => {
+      ctx.fillStyle = LEAF_COLS[k];
+      ctx.beginPath(); ctx.ellipse(4.1, 2.375, 3.6, 1.9, 0, 0, TAU); ctx.fill();
+    });
+  },
+  ring(k) {
+    const rx = ambRingR(k), hw = rx + 0.6, hh = rx * 0.6 + 0.6, a = (1 - (k + 0.5) / AMB_RINGS) * 0.22;
+    return this.make('r' + k, hw * 2, hh * 2, ctx => {
+      ctx.strokeStyle = `rgba(200,215,225,${a.toFixed(3)})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.ellipse(hw, hh, rx, rx * 0.6, 0, 0, TAU); ctx.stroke();
+    });
+  },
+};
+// Night overlay cut-outs. A light pool fades from full strength at a fifth of
+// its radius to nothing at the edge; drawn at an opacity, that is exactly the
+// per-frame gradient it replaces.
+let NIGHT_HOLE = null;
+function nightHoleSprite() {
+  if (NIGHT_HOLE) return NIGHT_HOLE;
+  const S = 128, c = makeCanvas(S, S), ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(S / 2, S / 2, S * 0.1, S / 2, S / 2, S / 2);
+  g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, S, S);
+  return (NIGHT_HOLE = c);
+}
+// Headlight beam in unzoomed units: a cone from the hull out to V.beam, origin
+// at the left edge, middle row. Scaling it by the zoom reproduces the old
+// per-frame gradient, whose radii were all proportional to the zoom too.
+const NIGHT_BEAMS = {};
+function nightBeamSprite(kind, V) {
+  if (NIGHT_BEAMS[kind]) return NIGHT_BEAMS[kind];
+  const L = V.beam, k = 0.5, H = L * 0.76;
+  const c = makeCanvas(L * k, H * k), ctx = c.getContext('2d');
+  ctx.scale(k, k);
+  ctx.translate(0, H / 2);
+  const g = ctx.createRadialGradient(0, 0, 20, 0, 0, L);
+  g.addColorStop(0, `rgba(0,0,0,${V.beamA})`); g.addColorStop(0.6, `rgba(0,0,0,${V.beamA * 0.6})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.moveTo(10, -10); ctx.lineTo(L, -L * 0.38); ctx.lineTo(L, L * 0.38); ctx.lineTo(10, 10); ctx.closePath(); ctx.fill();
+  return (NIGHT_BEAMS[kind] = c);
+}
 // Name tags are baked into sprites; this changes when web fonts finish loading so they re-bake.
 let LABEL_GEN = 0;
 if (typeof document !== 'undefined' && document.fonts) {
@@ -30,12 +108,15 @@ if (typeof document !== 'undefined' && document.fonts) {
 class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
+    // Opaque: every frame paints the whole canvas, so the compositor can skip
+    // blending it with the page underneath.
+    this.ctx = canvas.getContext('2d', { alpha: false });
     this.time = 0;
     this.quality = LOW_MEM ? 2 : 3;
     this.cloudTex = makeCloudTexture(1234);
     this.cloudPattern = this.ctx.createPattern(this.cloudTex, 'repeat');
     this.hud = new HudPainter(this);
+    this.camXf = [1, 0, 0];   // the current view's world transform: zoom, offset x, offset y
     this.views = [this.makeView(0)];
     this.view = this.views[0];
     this.resize();
@@ -159,21 +240,26 @@ class Renderer {
       ctx.rect(view.x, view.y, view.w, view.h);
       ctx.clip();
       const z = c.zoom * dpr;
-      ctx.setTransform(z, 0, 0, z, dpr * (view.x + view.w / 2 + sx) - c.x * z, dpr * (view.y + view.h / 2 + sy) - c.y * z);
+      const xf = this.camXf;
+      xf[0] = z; xf[1] = dpr * (view.x + view.w / 2 + sx) - c.x * z; xf[2] = dpr * (view.y + view.h / 2 + sy) - c.y * z;
+      ctx.setTransform(z, 0, 0, z, xf[1], xf[2]);
       const v = this.viewRect(80);
+      this.cullObstacles(v);
 
       this.drawTerrain(ctx, v);
-      this.drawGroundMarks(ctx);
+      this.drawGroundMarks(ctx, v);
       this.drawEscortGround(ctx);
       this.drawMines(ctx, v, view);
       this.drawStrikeMarks(ctx);
       this.drawWrecks(ctx, v);
       this.drawParticles(ctx, v, this.pDust);
-      const seen = t => t.alive && this.inView(t, v) && this.visibleTo(t, view);
-      for (const t of g.tanks) if (seen(t)) this.drawTankShadow(ctx, t);
-      this.drawObstacles(ctx, v, false);
+      const seen = this.seenTanks || (this.seenTanks = []);
+      seen.length = 0;
+      for (const t of g.tanks) if (t.alive && this.inView(t, v) && this.visibleTo(t, view)) seen.push(t);
+      this.drawTankShadows(ctx, seen);
+      this.drawObstacles(ctx, false);
       this.drawFlags(ctx, false);
-      for (const t of g.tanks) if (seen(t)) { if (t.isConvoy) this.drawConvoy(ctx, t); else this.drawTank(ctx, t); }
+      for (const t of seen) { if (t.isConvoy) this.drawConvoy(ctx, t); else this.drawTank(ctx, t); }
       this.drawFlags(ctx, true);
       const night = g.night;
       if (!night) { this.drawShells(ctx, v); this.drawMissiles(ctx, v); this.drawGrenades(ctx, v); }
@@ -181,7 +267,7 @@ class Renderer {
       this.drawAdditive(ctx, v);
       this.drawSmokes(ctx, v);
       if (!night) this.drawArtillery(ctx, v);
-      this.drawObstacles(ctx, v, true);
+      this.drawObstacles(ctx, true);
       this.drawPlanes(ctx, v);
       this.drawClouds(ctx, v);
       this.drawAmbient(ctx, v);
@@ -206,6 +292,18 @@ class Renderer {
   }
 
   inView(p, v) { return p.x > v.x0 && p.x < v.x1 && p.y > v.y0 && p.y < v.y1; }
+
+  // Draw in a sprite's own frame (origin at x, y, turned by a, scaled by s) with
+  // one setTransform, instead of a save/translate/rotate/scale/restore round trip.
+  place(ctx, x, y, a, s = 1) {
+    const xf = this.camXf, z = xf[0], c = Math.cos(a) * z * s, n = Math.sin(a) * z * s;
+    ctx.setTransform(c, n, -n, c, xf[1] + x * z, xf[2] + y * z);
+  }
+  // Back to plain world space for the current view.
+  camera(ctx) {
+    const xf = this.camXf;
+    ctx.setTransform(xf[0], 0, 0, xf[0], xf[1], xf[2]);
+  }
 
   // Enemy tanks inside a smokescreen are hidden unless you're right next to them.
   visibleTo(t, view) {
@@ -241,29 +339,29 @@ class Renderer {
     n.globalCompositeOperation = 'destination-out';
     const cam = view.cam, z = cam.zoom;
     const sx = x => (x - cam.x) * z + w / 2, sy = y => (y - cam.y) * z + h / 2;
+    // Light pools and headlight beams are soft gradients baked once (see
+    // nightHoleSprite / nightBeamSprite) and stamped with an opacity.
+    const holeImg = nightHoleSprite();
     const hole = (x, y, r, a) => {
       const px = sx(x), py = sy(y), R = r * z;
       if (px < -R || py < -R || px > w + R || py > h + R || a <= 0) return;
-      const gr = n.createRadialGradient(px, py, R * 0.2, px, py, R);
-      gr.addColorStop(0, `rgba(0,0,0,${a})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
-      n.fillStyle = gr;
-      n.fillRect(px - R, py - R, R * 2, R * 2);
+      n.globalAlpha = Math.min(1, a);
+      n.drawImage(holeImg, px - R, py - R, R * 2, R * 2);
     };
     const myTeam = view.player ? view.player.team : 0;
+    const beam = nightBeamSprite(kind, V), BL = V.beam;
     for (const t of g.tanks) {
       if (!t.alive) continue;
       if (t.team === myTeam || t.isConvoy) {
         hole(t.x, t.y, V.pool * t.scale, 0.95);
         // Headlight beam.
-        const L = V.beam * z, px = sx(t.x), py = sy(t.y);
-        n.save();
-        n.translate(px, py);
-        n.rotate(t.angle);
-        const gr = n.createRadialGradient(0, 0, 20 * z, 0, 0, L);
-        gr.addColorStop(0, `rgba(0,0,0,${V.beamA})`); gr.addColorStop(0.6, `rgba(0,0,0,${V.beamA * 0.6})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
-        n.fillStyle = gr;
-        n.beginPath(); n.moveTo(10 * z, -10 * z); n.lineTo(L, -L * 0.38); n.lineTo(L, L * 0.38); n.lineTo(10 * z, 10 * z); n.closePath(); n.fill();
-        n.restore();
+        const px = sx(t.x), py = sy(t.y), L = BL * z;
+        if (px < -L || py < -L || px > w + L || py > h + L) continue;
+        const c = Math.cos(t.angle) * z, s = Math.sin(t.angle) * z;
+        n.globalAlpha = 1;
+        n.setTransform(c, s, -s, c, px, py);
+        n.drawImage(beam, 0, -BL * 0.38, BL, BL * 0.76);
+        n.setTransform(1, 0, 0, 1, 0, 0);
       } else hole(t.x, t.y, 60, 0.35);
     }
     for (const l of this.fx.lights) hole(l.x, l.y, l.r * 1.7, clamp(l.life / l.max, 0, 1));
@@ -271,6 +369,7 @@ class Renderer {
     for (const s of g.shells) if (s.flame) hole(s.x, s.y, 70, 0.4);
     for (const m of g.missiles) hole(m.x, m.y, 110, 0.6);
     for (const t of g.tanks) if (t.alive && t.burnT > 0) hole(t.x, t.y, 120, 0.6);
+    n.globalAlpha = 1;
     ctx.save();
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.drawImage(c, view.x, view.y, view.w, view.h);
@@ -299,7 +398,7 @@ class Renderer {
   }
 
   // Team pads, flag stands and the hill ring.
-  drawGroundMarks(ctx) {
+  drawGroundMarks(ctx, v) {
     const g = this.game, m = g.map, t = this.time;
     if (m.layout === 'teams') {
       let pads = this.pads;
@@ -318,6 +417,7 @@ class Renderer {
       }
       ctx.lineWidth = 4;
       for (const p of pads.list) {
+        if (p.x > v.x1 || p.y > v.y1 || p.x + p.w < v.x0 || p.y + p.h < v.y0) continue;
         ctx.fillStyle = p.fill;
         ctx.fillRect(p.x, p.y, p.w, p.h);
         ctx.strokeStyle = p.stroke;
@@ -389,17 +489,9 @@ class Renderer {
     }
   }
 
+  // One tank's shadow in whatever transform is current (hangar and world-map previews).
   drawTankShadow(ctx, t) {
     const sh = TankArt.getShadows(), s = t.scale;
-    if (t.isConvoy) {
-      ctx.save();
-      ctx.globalAlpha = 0.35;
-      ctx.translate(t.x + 7, t.y + 9);
-      ctx.rotate(t.angle);
-      ctx.drawImage(sh.hull, -(CONVOY_W + 20) / 2, -(CONVOY_H + 18) / 2, CONVOY_W + 20, CONVOY_H + 18);
-      ctx.restore();
-      return;
-    }
     ctx.save();
     ctx.globalAlpha = 0.42;
     ctx.translate(t.x + 5 * s, t.y + 7 * s);
@@ -414,6 +506,35 @@ class Renderer {
     ctx.scale(s, s);
     ctx.drawImage(sh.turret, -(TURRET_W + 46) / 2, -(TURRET_H + 16) / 2, TURRET_W + 46, TURRET_H + 16);
     ctx.restore();
+  }
+
+  // Shadows are plain black, so the order they overlap in can't show: draw
+  // them grouped by opacity instead of tank by tank.
+  drawTankShadows(ctx, list) {
+    if (!list.length) return;
+    const sh = TankArt.getShadows();
+    ctx.globalAlpha = 0.35;
+    for (const t of list) {
+      if (!t.isConvoy) continue;
+      this.place(ctx, t.x + 7, t.y + 9, t.angle);
+      ctx.drawImage(sh.hull, -(CONVOY_W + 20) / 2, -(CONVOY_H + 18) / 2, CONVOY_W + 20, CONVOY_H + 18);
+    }
+    ctx.globalAlpha = 0.42;
+    for (const t of list) {
+      if (t.isConvoy) continue;
+      const s = t.scale;
+      this.place(ctx, t.x + 5 * s, t.y + 7 * s, t.angle, s);
+      ctx.drawImage(sh.hull, -(HULL_W + 16) / 2, -(HULL_H + 16) / 2, HULL_W + 16, HULL_H + 16);
+    }
+    ctx.globalAlpha = 0.3;
+    for (const t of list) {
+      if (t.isConvoy) continue;
+      const s = t.scale;
+      this.place(ctx, t.x + (9 - Math.cos(t.angle) * 2) * s, t.y + (12 - Math.sin(t.angle) * 2) * s, t.turret, s);
+      ctx.drawImage(sh.turret, -(TURRET_W + 46) / 2, -(TURRET_H + 16) / 2, TURRET_W + 46, TURRET_H + 16);
+    }
+    ctx.globalAlpha = 1;
+    this.camera(ctx);
   }
 
   drawTread(ctx, y0, phase, h = 10, x0 = -30, len = 60) {
@@ -1125,33 +1246,72 @@ class Renderer {
     ctx.restore();
   }
 
-  drawObstacles(ctx, v, canopies) {
-    const sprites = this.terrain.sprites, obs = this.game.map.obstacles;
-    for (let i = 0; i < sprites.length; i++) {
-      const s = sprites[i];
-      if (!!s.canopy !== canopies) continue;
-      if (s.x > v.x1 || s.y > v.y1 || s.x + s.w < v.x0 || s.y + s.h < v.y0) continue;
-      if (canopies) {
-        // Fade canopies when a tank is hiding underneath.
-        const o = obs[i];
-        let under = false;
-        const rr = (o.canopy + 10) ** 2;
-        for (const t of this.game.tanks) if (t.alive && dist2(t.x, t.y, o.cx, o.cy) < rr) { under = true; break; }
-        o._fade = lerp(o._fade === undefined ? 1 : o._fade, under ? 0.45 : 1, 0.15);
-        ctx.globalAlpha = o._fade;
-        if (this.quality >= 2) {
-          const sway = Math.sin(this.time * 0.9 + o.seed) * 0.03;
-          ctx.save();
-          ctx.translate(o.cx, o.cy);
-          ctx.rotate(sway);
-          ctx.drawImage(s.canvas, s.x - o.cx, s.y - o.cy, s.w, s.h);
-          ctx.restore();
-        } else ctx.drawImage(s.canvas, s.x, s.y, s.w, s.h);
-        ctx.globalAlpha = 1;
-      } else {
-        ctx.drawImage(s.canvas, s.x, s.y, s.w, s.h);
+  // Obstacle sprites bucketed by area, so a frame only looks at the few hundred
+  // pixels around the view instead of every rock and tree on the map.
+  spriteGrid() {
+    const T = this.terrain;
+    if (this._sg && this._sg.terrain === T) return this._sg;
+    const S = 256, P = TERRAIN_PAD, m = this.game.map;
+    const gc = Math.ceil((m.w + P * 2) / S), gr = Math.ceil((m.h + P * 2) / S);
+    const cells = [];
+    for (let i = 0; i < gc * gr; i++) cells.push([]);
+    T.sprites.forEach((s, i) => {
+      const c0 = clamp(Math.floor((s.x + P) / S), 0, gc - 1), c1 = clamp(Math.floor((s.x + s.w + P) / S), 0, gc - 1);
+      const r0 = clamp(Math.floor((s.y + P) / S), 0, gr - 1), r1 = clamp(Math.floor((s.y + s.h + P) / S), 0, gr - 1);
+      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) cells[r * gc + c].push(i);
+    });
+    this._sg = { terrain: T, S, gc, gr, cells, mark: new Uint32Array(T.sprites.length), q: 0, base: [], tops: [] };
+    return this._sg;
+  }
+
+  // Which obstacle sprites overlap this view: ground pieces and tree canopies,
+  // each kept in map order so overlaps draw exactly as before.
+  cullObstacles(v) {
+    const G = this.spriteGrid(), sprites = this.terrain.sprites, P = TERRAIN_PAD, S = G.S, mark = G.mark;
+    const base = G.base, tops = G.tops, q = ++G.q;
+    base.length = 0; tops.length = 0;
+    const c0 = Math.max(0, Math.floor((v.x0 + P) / S)), c1 = Math.min(G.gc - 1, Math.floor((v.x1 + P) / S));
+    const r0 = Math.max(0, Math.floor((v.y0 + P) / S)), r1 = Math.min(G.gr - 1, Math.floor((v.y1 + P) / S));
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const cell = G.cells[r * G.gc + c];
+        for (let k = 0; k < cell.length; k++) {
+          const i = cell[k];
+          if (mark[i] === q) continue;
+          mark[i] = q;
+          const s = sprites[i];
+          if (s.x > v.x1 || s.y > v.y1 || s.x + s.w < v.x0 || s.y + s.h < v.y0) continue;
+          (s.canopy ? tops : base).push(i);
+        }
       }
     }
+    base.sort((a, b) => a - b);
+    tops.sort((a, b) => a - b);
+  }
+
+  drawObstacles(ctx, canopies) {
+    const sprites = this.terrain.sprites, G = this._sg;
+    if (!canopies) {
+      const list = G.base;
+      for (let k = 0; k < list.length; k++) { const s = sprites[list[k]]; ctx.drawImage(s.canvas, s.x, s.y, s.w, s.h); }
+      return;
+    }
+    const obs = this.game.map.obstacles, tanks = this.game.tanks, list = G.tops, sway = this.quality >= 2;
+    for (let k = 0; k < list.length; k++) {
+      const i = list[k], s = sprites[i], o = obs[i];
+      // Fade canopies when a tank is hiding underneath.
+      let under = false;
+      const rr = (o.canopy + 10) ** 2;
+      for (const t of tanks) if (t.alive && dist2(t.x, t.y, o.cx, o.cy) < rr) { under = true; break; }
+      o._fade = lerp(o._fade === undefined ? 1 : o._fade, under ? 0.45 : 1, 0.15);
+      ctx.globalAlpha = o._fade;
+      if (sway) {
+        this.place(ctx, o.cx, o.cy, Math.sin(this.time * 0.9 + o.seed) * 0.03);
+        ctx.drawImage(s.canvas, s.x - o.cx, s.y - o.cy, s.w, s.h);
+      } else ctx.drawImage(s.canvas, s.x, s.y, s.w, s.h);
+    }
+    ctx.globalAlpha = 1;
+    if (sway && list.length) this.camera(ctx);
   }
 
   drawClouds(ctx, v) {
@@ -1440,19 +1600,21 @@ class Renderer {
 
   // Drifting ambient particles (snow, petals, dust, pollen). Positions are a
   // pure function of time and index over a repeating world tile: no state.
+  // Weather particles. Snowflakes and raindrops are gathered by opacity band
+  // and drawn a band at a time, so the colour is set four times a frame rather
+  // than once per particle; petals, leaves and ripples are blits of tiny
+  // pre-drawn sprites (AmbArt). Rain on a big map used to cost over a thousand
+  // canvas calls a frame. (One shared path per band is worse still: the GPU
+  // rasteriser chokes on a path with hundreds of pieces.)
   drawAmbient(ctx, v) {
     const kind = this.game.map.biome.ambient;
-    const cfg = {
-      snow: { n: 60, vx: 16, vy: 34, sway: 10 },
-      petals: { n: 30, vx: 34, vy: 20, sway: 14 },
-      dust: { n: 18, vx: 70, vy: 6, sway: 4 },
-      pollen: { n: 14, vx: 10, vy: -4, sway: 8 },
-      leaves: { n: 26, vx: 28, vy: 24, sway: 22 },
-      drizzle: { n: 110, vx: -60, vy: 520, sway: 0 },
-    }[kind];
+    const cfg = AMBIENT[kind];
     if (!cfg) return;
-    const T = 640, t = this.time, count = Math.round(cfg.n * this.Q.ambient);
-    ctx.save();
+    const T = 640, t = this.time, count = Math.round(cfg.n * this.Q.ambient), L = AMB_LEVELS;
+    const turned = kind === 'petals' || kind === 'leaves';
+    if (kind === 'pollen') ctx.fillStyle = 'rgba(255,240,170,0.5)';
+    const flakes = this.flakes || (this.flakes = Array.from({ length: L }, () => []));
+    for (const b of flakes) b.length = 0;
     for (let tx = Math.floor(v.x0 / T); tx <= Math.floor(v.x1 / T); tx++) {
       for (let ty = Math.floor(v.y0 / T); ty <= Math.floor(v.y1 / T); ty++) {
         for (let i = 0; i < count; i++) {
@@ -1463,38 +1625,51 @@ class Renderer {
           const x = tx * T + px, y = ty * T + py;
           if (x < v.x0 || x > v.x1 || y < v.y0 || y > v.y1) continue;
           if (kind === 'snow') {
-            ctx.fillStyle = `rgba(255,255,255,${0.55 + h3 * 0.4})`;
-            ctx.beginPath(); ctx.arc(x, y, 1 + h3 * 1.8, 0, TAU); ctx.fill();
+            const b = flakes[Math.min(L - 1, (h3 * L) | 0)];
+            b.push(x, y, 1 + h3 * 1.8);
           } else if (kind === 'petals') {
-            ctx.fillStyle = h1 < 0.5 ? 'rgba(248,190,212,0.9)' : 'rgba(255,232,240,0.85)';
-            ctx.beginPath(); ctx.ellipse(x, y, 3.2, 1.7, t * (1 + h2 * 2) + h1 * 6, 0, TAU); ctx.fill();
+            this.place(ctx, x, y, t * (1 + h2 * 2) + h1 * 6);
+            ctx.drawImage(AmbArt.petal(h1 < 0.5 ? 0 : 1), -3.7, -2.2, 7.4, 4.4);
           } else if (kind === 'leaves') {
-            ctx.fillStyle = LEAF_COLS[Math.floor(h1 * 4)];
             const rot = t * (0.8 + h2 * 2.2) + h1 * 6, flip = Math.abs(Math.sin(t * (1.5 + h3 * 2) + i));
-            ctx.beginPath(); ctx.ellipse(x, y, 3.6, 1.9 * (0.35 + flip * 0.65), rot, 0, TAU); ctx.fill();
+            this.place(ctx, x, y, rot);
+            const hy = 1.9 * (0.35 + flip * 0.65) * 1.25;   // the sprite's box is 1.25x the leaf
+            ctx.drawImage(AmbArt.leaf(Math.floor(h1 * 4)), -4.1, -hy, 8.2, hy * 2);
           } else if (kind === 'drizzle') {
-            ctx.strokeStyle = `rgba(200,215,225,${0.18 + h3 * 0.2})`;
-            ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 2.2, y - 13); ctx.stroke();
+            flakes[Math.min(L - 1, (h3 * L) | 0)].push(x, y, 0);
             // Ripple rings where drops land (a pure function of time, like the drops).
-            const rk = (t * 1.3 + h2) % 1;
             if (i % 4 === 0) {
-              ctx.strokeStyle = `rgba(200,215,225,${(1 - rk) * 0.22})`;
-              ctx.beginPath(); ctx.ellipse(tx * T + h3 * T, ty * T + h1 * T, 2 + rk * 7, (2 + rk * 7) * 0.6, 0, 0, TAU); ctx.stroke();
+              const rk = (t * 1.3 + h2) % 1, k = Math.min(AMB_RINGS - 1, (rk * AMB_RINGS) | 0);
+              const rx = ambRingR(k), hw = rx + 0.6, hh = rx * 0.6 + 0.6;
+              ctx.drawImage(AmbArt.ring(k), tx * T + h3 * T - hw, ty * T + h1 * T - hh, hw * 2, hh * 2);
             }
           } else if (kind === 'dust') {
             ctx.globalAlpha = 0.18 + h3 * 0.12;
             const r = 5 + h3 * 7;
             ctx.drawImage(FxArt.tints.dust, x - r, y - r, r * 2, r * 2);
-            ctx.globalAlpha = 1;
           } else {
-            ctx.fillStyle = 'rgba(255,240,170,0.5)';
             ctx.fillRect(x, y, 1.5, 1.5);
           }
         }
       }
     }
-    ctx.restore();
+    ctx.globalAlpha = 1;
+    if (turned) this.camera(ctx);
+    if (kind === 'drizzle') {
+      ctx.lineWidth = 1;
+      for (let k = 0; k < L; k++) {
+        const b = flakes[k];
+        if (!b.length) continue;
+        ctx.strokeStyle = AMB_RAIN_COLS[k];
+        for (let j = 0; j < b.length; j += 3) { ctx.beginPath(); ctx.moveTo(b[j], b[j + 1]); ctx.lineTo(b[j] + 2.2, b[j + 1] - 13); ctx.stroke(); }
+      }
+    }
+    if (kind === 'snow') for (let k = 0; k < L; k++) {
+      const b = flakes[k];
+      if (!b.length) continue;
+      ctx.fillStyle = AMB_SNOW_COLS[k];
+      for (let j = 0; j < b.length; j += 3) { ctx.beginPath(); ctx.arc(b[j], b[j + 1], b[j + 2], 0, TAU); ctx.fill(); }
+    }
   }
 
   // Health bars, names and floating damage numbers. viewPlayer's own tank is

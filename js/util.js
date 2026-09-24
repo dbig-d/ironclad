@@ -189,6 +189,14 @@ function makeCanvas(w, h) {
   return c;
 }
 
+// A finished sprite blits faster as an ImageBitmap than as a canvas (about a
+// fifth less per drawImage on a phone). Conversion is asynchronous: `swap`
+// receives the bitmap when it is ready, and the canvas serves until then.
+function toBitmap(canvas, swap) {
+  if (!canvas || typeof createImageBitmap !== 'function') return;
+  createImageBitmap(canvas).then(swap, () => {});
+}
+
 function roundRectPath(ctx, x, y, w, h, r) {
   r = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
